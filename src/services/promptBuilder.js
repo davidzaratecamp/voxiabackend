@@ -114,6 +114,12 @@ function buildSessionConfig({ campaign, contact }) {
           // valor.
           silence_duration_ms: 200,
           prefix_padding_ms: 200,
+          // Que tan fuerte/clara debe sonar la voz para contar como
+          // "empezo a hablar" (0 a 1, default ~0.5). Un poco mas alto que
+          // el default reduce falsos positivos por eco de linea o ruido al
+          // conectar la llamada -- eso era lo que cortaba el saludo del
+          // agente a mitad de palabra al inicio de algunas llamadas.
+          threshold: 0.6,
           // interrupt_response=true es lo que hace que el modelo deje de
           // generar audio en cuanto detecta que el interlocutor empezo a
           // hablar. El corte del audio ya enviado a Twilio se maneja aparte

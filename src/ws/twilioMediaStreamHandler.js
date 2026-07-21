@@ -138,6 +138,16 @@ function registerTwilioMediaStreamHandler(wss) {
   });
 }
 
+// Justo al conectar la llamada hay ruido/eco de linea (tono de timbrado
+// que se alcanza a colar, la propia voz del agente rebotando en el
+// telefono de quien contesta antes de que se estabilice la linea) que el
+// VAD de OpenAI a veces confunde con que el interlocutor empezo a hablar
+// -- eso corta el saludo del agente a mitad de palabra, varias veces
+// seguidas, justo al inicio de la llamada. Ignorar interrupciones durante
+// este colchon inicial evita el problema sin afectar la interrupcion real
+// una vez la conversacion ya esta en curso.
+const INTERRUPT_GRACE_PERIOD_MS = 1200;
+
 function connectToOpenAIRealtime(sessionConfig, { onAudioDelta, onTranscriptDelta, onInterrupt }) {
   // "model" solo va en la URL de conexion -- el resto de sessionConfig
   // (voice/instructions/modalities/turn_detection/tools) es el payload de
@@ -152,6 +162,8 @@ function connectToOpenAIRealtime(sessionConfig, { onAudioDelta, onTranscriptDelt
     },
   });
 
+  let connectedAt = null;
+
   // Instrumentacion de latencia: mide desde que se dispara un turno (el
   // "response.create" inicial, o el momento en que el usuario deja de
   // hablar) hasta que llega el primer byte de audio de respuesta. Esto es
@@ -162,6 +174,7 @@ function connectToOpenAIRealtime(sessionConfig, { onAudioDelta, onTranscriptDelt
 
   socket.on('open', () => {
     console.log('[openai-realtime] Socket abierto, enviando session.update.');
+    connectedAt = Date.now();
     socket.send(JSON.stringify({ type: 'session.update', session }));
 
     // En una llamada saliente el que contesta esta en silencio esperando
@@ -194,7 +207,12 @@ function connectToOpenAIRealtime(sessionConfig, { onAudioDelta, onTranscriptDelt
       onTranscriptDelta(event.delta);
     }
     if (event.type === 'input_audio_buffer.speech_started') {
-      onInterrupt();
+      const sinceConnected = connectedAt ? Date.now() - connectedAt : Infinity;
+      if (sinceConnected < INTERRUPT_GRACE_PERIOD_MS) {
+        console.log(`[openai-realtime] interrupcion ignorada (colchon inicial, ${sinceConnected}ms desde conectar)`);
+      } else {
+        onInterrupt();
+      }
     }
     if (event.type === 'input_audio_buffer.speech_stopped') {
       turnStartedAt = Date.now();
