@@ -2,11 +2,11 @@ const { pool } = require('../config/db');
 
 // telephonyProvider siempre viene forzado desde organizations.telephony_provider
 // (ver campaignController.create) -- este modelo solo persiste lo que le pasan.
-async function create({ organizationId, name, type, telephonyProvider, voice, language, speed, systemPromptTemplate }) {
+async function create({ organizationId, name, type, telephonyProvider, voice, language, accent, speed, systemPromptTemplate }) {
   const [result] = await pool.query(
-    `INSERT INTO campaigns (organization_id, name, type, telephony_provider, voice, language, speed, system_prompt_template)
-     VALUES (:organizationId, :name, :type, :telephonyProvider, :voice, :language, :speed, :systemPromptTemplate)`,
-    { organizationId, name, type, telephonyProvider, voice, language, speed, systemPromptTemplate }
+    `INSERT INTO campaigns (organization_id, name, type, telephony_provider, voice, language, accent, speed, system_prompt_template)
+     VALUES (:organizationId, :name, :type, :telephonyProvider, :voice, :language, :accent, :speed, :systemPromptTemplate)`,
+    { organizationId, name, type, telephonyProvider, voice, language, accent, speed, systemPromptTemplate }
   );
   return findById(result.insertId);
 }
@@ -45,7 +45,7 @@ async function updateStatus(id, status) {
 
 // telephonyProvider y organizationId NO son editables aqui a proposito
 // (siguen atados a la organizacion, ver campaignController.create).
-async function update(id, { name, type, voice, language, speed, systemPromptTemplate }) {
+async function update(id, { name, type, voice, language, accent, speed, systemPromptTemplate }) {
   const fields = [];
   const params = { id };
 
@@ -64,6 +64,10 @@ async function update(id, { name, type, voice, language, speed, systemPromptTemp
   if (language !== undefined) {
     fields.push('language = :language');
     params.language = language;
+  }
+  if (accent !== undefined) {
+    fields.push('accent = :accent');
+    params.accent = accent;
   }
   if (speed !== undefined) {
     fields.push('speed = :speed');

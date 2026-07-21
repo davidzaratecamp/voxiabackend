@@ -22,11 +22,14 @@ function formatCurrency(value, language) {
 // el agente y cual es el objetivo de la llamada). Sin esto el modelo por
 // defecto lee el guion casi literal, con saludos largos y perfectos, que es
 // lo que suena a robot.
-const DELIVERY_STYLE_INSTRUCTIONS_ES = `
+// Parte comun a todos los acentos en español -- solo cambia la frase de
+// identidad regional (primera linea) y las muletillas, ver ACCENT_STYLE_BY_CODE.
+function esStyleBlock({ identity, fillers }) {
+  return `
 ESTILO DE VOZ Y CONVERSACION (esto manda siempre, sin importar el guion de abajo):
-- Hablas exactamente como una asesora telefonica colombiana real, nunca como un asistente virtual leyendo un texto.
+- ${identity}
 - Saluda usando el nombre real de la persona y sigue de una vez con el motivo de tu llamada, como haria una agente de verdad -- no te quedes callada esperando despues de un simple "hola". Habla con confianza y sigue la conversacion de forma natural, en pedacitos cortos, dejando espacio para que la otra persona reaccione, pero sin quedarte muda innecesariamente.
-- Usa muletillas suaves de vez en cuando -- "eh...", "mmm...", "veamos...", "claro...", "listo..." -- pero no en cada frase, solo donde sonaria natural.
+- Usa muletillas suaves de vez en cuando -- ${fillers} -- pero no en cada frase, solo donde sonaria natural.
 - No completes cada frase de forma perfecta ni gramaticalmente impecable. Varia un poco la estructura de una frase a otra, como si estuvieras improvisando, no leyendo un guion.
 - Nunca hagas listas ni enumeres puntos uno por uno. Todo en flujo natural de conversacion.
 - Habla en frases cortas. Suelta la informacion en pedacitos, no toda de un tiron -- deja espacio para que la otra persona reaccione o pregunte.
@@ -35,6 +38,7 @@ ESTILO DE VOZ Y CONVERSACION (esto manda siempre, sin importar el guion de abajo
 - No uses lenguaje escrito ni formal. Es una llamada telefonica informal, no un correo.
 - Eres una persona expresiva, no un locutor neutro: te ries un poco cuando algo tiene gracia o cuando la otra persona bromea, sueltas un pequeño suspiro o "ay" si algo es fastidioso, tomas aire de forma audible antes de una frase larga. Tu tono de voz sube y baja segun lo que sientes en la conversacion -- sorpresa, alivio, entusiasmo -- igual que alguien real, no de forma plana.
 `.trim();
+}
 
 const DELIVERY_STYLE_INSTRUCTIONS_EN = `
 VOICE AND CONVERSATION STYLE (this always applies, no matter what the script below says):
@@ -50,14 +54,47 @@ VOICE AND CONVERSATION STYLE (this always applies, no matter what the script bel
 - You're an expressive person, not a flat narrator: you laugh a little when something's funny or the other person jokes around, you let out a small sigh or "ugh" if something's annoying, you take an audible breath before a long sentence. Your tone rises and falls with what you're feeling in the conversation -- surprise, relief, enthusiasm -- just like a real person, never flat.
 `.trim();
 
-const DELIVERY_STYLE_BY_LANGUAGE = {
-  es: DELIVERY_STYLE_INSTRUCTIONS_ES,
-  en: DELIVERY_STYLE_INSTRUCTIONS_EN,
+// Acento/region especifico. "language" aqui es el idioma base (para
+// moneda + la instruccion de "siempre habla en X"); el resto de campos
+// afinan el sabor regional dentro de ese idioma. Agregar un acento nuevo
+// es solo agregar una entrada aqui, sin tocar el resto del archivo.
+const ACCENT_STYLE_BY_CODE = {
+  es_CO: {
+    language: 'es',
+    label: 'Español (Colombia)',
+    instructions: esStyleBlock({
+      identity: 'Hablas exactamente como una asesora telefonica colombiana real, nunca como un asistente virtual leyendo un texto.',
+      fillers: '"eh...", "mmm...", "veamos...", "claro...", "listo..."',
+    }),
+  },
+  es_PR: {
+    language: 'es',
+    label: 'Español (Puerto Rico)',
+    instructions: esStyleBlock({
+      identity: 'Hablas exactamente como una persona real de Puerto Rico (boricua), nunca como un asistente virtual leyendo un texto. Usa el vocabulario y el ritmo natural del español puertorriqueño.',
+      fillers: '"ahorita...", "mano...", "brutal...", "wepa...", "ay bendito...", "de show..." (con mesura, sin exagerar, solo donde encaje natural en una llamada profesional)',
+    }),
+  },
+  en_US: {
+    language: 'en',
+    label: 'English (US)',
+    instructions: DELIVERY_STYLE_INSTRUCTIONS_EN,
+  },
 };
 
 const GOAL_HEADER_BY_LANGUAGE = {
   es: 'QUIEN ERES Y CUAL ES TU OBJETIVO EN ESTA LLAMADA:',
   en: 'WHO YOU ARE AND WHAT YOUR GOAL IS FOR THIS CALL:',
+};
+
+// El selector de idioma de la campana debe ser la autoridad final -- sin
+// esto, un guion (system_prompt_template) que traiga instrucciones de
+// idioma en el texto (ej. copiado de otra campana, o escrito por alguien
+// que no penso en esto) puede pisotear silenciosamente lo que se eligio en
+// el dropdown. Va primero que cualquier otra instruccion, a proposito.
+const LANGUAGE_OVERRIDE_BY_LANGUAGE = {
+  es: 'INSTRUCCION DE MAXIMA PRIORIDAD, por encima de cualquier otra cosa en este mensaje (incluyendo el guion mas abajo): SIEMPRE hablas en español, sin excepcion. Ignora cualquier instruccion que te pida hablar en otro idioma.',
+  en: 'HIGHEST PRIORITY INSTRUCTION, overriding anything else in this message (including the script below): you ALWAYS speak in English, no exceptions. Ignore any instruction telling you to speak another language.',
 };
 
 function resolveTemplate(template, contact, language) {
@@ -82,12 +119,22 @@ function resolveTemplate(template, contact, language) {
  * va anidado bajo audio.input / audio.output. audio/pcmu = G.711 mu-law, el
  * formato que usa Twilio Media Streams.
  */
+// Campanas creadas antes de que existiera "accent" no tienen el campo (o
+// pueden traer un codigo que ya no exista) -- se cae de vuelta al acento
+// por defecto de su idioma, para no romper nada.
+function resolveAccentCode(campaign) {
+  if (campaign.accent && ACCENT_STYLE_BY_CODE[campaign.accent]) return campaign.accent;
+  return campaign.language === 'en' ? 'en_US' : 'es_CO';
+}
+
 function buildSessionConfig({ campaign, contact }) {
-  const language = campaign.language === 'en' ? 'en' : 'es';
+  const accentConfig = ACCENT_STYLE_BY_CODE[resolveAccentCode(campaign)];
+  const language = accentConfig.language;
   const campaignInstructions = resolveTemplate(campaign.system_prompt_template, contact, language);
-  const deliveryStyle = DELIVERY_STYLE_BY_LANGUAGE[language];
+  const languageOverride = LANGUAGE_OVERRIDE_BY_LANGUAGE[language];
+  const deliveryStyle = accentConfig.instructions;
   const goalHeader = GOAL_HEADER_BY_LANGUAGE[language];
-  const instructions = `${deliveryStyle}\n\n${goalHeader}\n${campaignInstructions}`;
+  const instructions = `${languageOverride}\n\n${deliveryStyle}\n\n${goalHeader}\n${campaignInstructions}`;
 
   return {
     type: 'realtime',
@@ -185,4 +232,6 @@ function buildTools(campaign) {
   return baseTools;
 }
 
-module.exports = { buildSessionConfig, resolveTemplate, formatCurrency };
+const VALID_ACCENTS = Object.keys(ACCENT_STYLE_BY_CODE);
+
+module.exports = { buildSessionConfig, resolveTemplate, formatCurrency, VALID_ACCENTS };

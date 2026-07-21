@@ -1,6 +1,7 @@
 const campaignModel = require('../models/campaignModel');
 const organizationModel = require('../models/organizationModel');
 const callOrchestrator = require('../services/callOrchestrator');
+const { VALID_ACCENTS } = require('../services/promptBuilder');
 const { assertOrgAccess } = require('../middleware/auth');
 const HttpError = require('../utils/httpError');
 
@@ -16,8 +17,19 @@ function validateSpeed(speed) {
   }
 }
 
+function validateAccent(accent) {
+  if (accent === undefined || accent === null) return;
+  if (!VALID_ACCENTS.includes(accent)) {
+    throw new HttpError(400, `accent debe ser uno de: ${VALID_ACCENTS.join(', ')}`);
+  }
+}
+
+function defaultAccentForLanguage(language) {
+  return language === 'en' ? 'en_US' : 'es_CO';
+}
+
 async function create(req, res) {
-  const { name, type, voice, language, speed, systemPromptTemplate } = req.body;
+  const { name, type, voice, language, accent, speed, systemPromptTemplate } = req.body;
 
   if (!name || !systemPromptTemplate) {
     throw new HttpError(400, 'name y systemPromptTemplate son obligatorios.');
@@ -26,6 +38,7 @@ async function create(req, res) {
     throw new HttpError(400, 'language debe ser "es" o "en".');
   }
   validateSpeed(speed);
+  validateAccent(accent);
 
   let organizationId;
   if (req.user.role === 'admin') {
@@ -45,6 +58,7 @@ async function create(req, res) {
     telephonyProvider: organization.telephony_provider,
     voice: voice || 'alloy',
     language: language || 'es',
+    accent: accent || defaultAccentForLanguage(language || 'es'),
     speed: speed || 1.0,
     systemPromptTemplate,
   });
@@ -84,12 +98,13 @@ async function update(req, res) {
   if (!campaign) throw new HttpError(404, 'Campana no encontrada.');
   assertOrgAccess(req.user, campaign.organization_id);
 
-  const { name, type, voice, language, speed, systemPromptTemplate } = req.body;
+  const { name, type, voice, language, accent, speed, systemPromptTemplate } = req.body;
   if (language && !['es', 'en'].includes(language)) {
     throw new HttpError(400, 'language debe ser "es" o "en".');
   }
   validateSpeed(speed);
-  const updated = await campaignModel.update(req.params.id, { name, type, voice, language, speed, systemPromptTemplate });
+  validateAccent(accent);
+  const updated = await campaignModel.update(req.params.id, { name, type, voice, language, accent, speed, systemPromptTemplate });
   res.json(updated);
 }
 

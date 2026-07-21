@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS campaigns (
   -- promptBuilder.js) como el formato de moneda de {{balance_due}}.
   language ENUM('es', 'en') NOT NULL DEFAULT 'es',
 
+  -- Acento/region especifico dentro del idioma (ej. 'es_CO', 'es_PR',
+  -- 'en_US'). Determina el bloque de estilo exacto en promptBuilder.js
+  -- (ACCENT_STYLE_BY_CODE) -- language sigue mandando el idioma base
+  -- (moneda, instruccion de "siempre habla en X"), accent afina el sabor
+  -- regional dentro de ese idioma.
+  accent VARCHAR(10) NOT NULL DEFAULT 'es_CO',
+
   -- Velocidad de habla del agente para la API Realtime (0.25 a 1.5, 1.0 =
   -- normal). Ver audio.output.speed en promptBuilder.js.
   speed DECIMAL(3, 2) NOT NULL DEFAULT 1.00,
