@@ -5,12 +5,6 @@ const campaignModel = require('../models/campaignModel');
 const callLogModel = require('../models/callLogModel');
 const callOrchestrator = require('../services/callOrchestrator');
 const promptBuilder = require('../services/promptBuilder');
-const fillerAudio = require('../services/telephony/fillerAudio');
-
-// 20ms de audio/pcmu a 8kHz = 160 muestras = 160 bytes (1 byte/muestra en
-// mu-law) -- el tamano de frame estandar que espera Twilio Media Streams.
-const FILLER_FRAME_BYTES = 160;
-const FILLER_FRAME_MS = 20;
 
 /**
  * Puente de audio bidireccional Twilio Media Streams <-> OpenAI Realtime.
@@ -38,40 +32,6 @@ function registerTwilioMediaStreamHandler(wss) {
     let transcriptBuffer = '';
     let callStartedAt = null;
     let mediaFromTwilioCount = 0;
-    let campaignLanguage = 'es';
-    let fillerTimer = null;
-
-    // Reproduce un "mmm..."/"a ver..." en cuanto el usuario termina de
-    // hablar (input_audio_buffer.speech_stopped), EN PARALELO mientras
-    // OpenAI todavia esta generando la respuesta real -- no es un relleno
-    // que se agrega despues del silencio, es lo que evita que el silencio
-    // exista. Se corta apenas llega el primer audio real (ver
-    // onFirstAudioOfTurn) o si el usuario vuelve a interrumpir.
-    function startFiller() {
-      stopFiller();
-      if (twilioSocket.readyState !== WebSocket.OPEN || !streamSid) return;
-
-      const audioBuffer = fillerAudio.getRandomFiller(campaignLanguage);
-      let offset = 0;
-      fillerTimer = setInterval(() => {
-        if (twilioSocket.readyState !== WebSocket.OPEN || offset >= audioBuffer.length) {
-          stopFiller();
-          return;
-        }
-        const frame = audioBuffer.subarray(offset, offset + FILLER_FRAME_BYTES);
-        offset += FILLER_FRAME_BYTES;
-        twilioSocket.send(
-          JSON.stringify({ event: 'media', streamSid, media: { payload: frame.toString('base64') } })
-        );
-      }, FILLER_FRAME_MS);
-    }
-
-    function stopFiller() {
-      if (fillerTimer) {
-        clearInterval(fillerTimer);
-        fillerTimer = null;
-      }
-    }
 
     twilioSocket.on('message', async (raw) => {
       const event = JSON.parse(raw.toString());
@@ -102,7 +62,6 @@ function registerTwilioMediaStreamHandler(wss) {
 
           const contact = await contactModel.findById(params.contactId);
           const campaign = await campaignModel.findById(contact.campaign_id);
-          campaignLanguage = campaign.language || 'es';
           const sessionConfig = promptBuilder.buildSessionConfig({ campaign, contact });
           console.log(`[twilio-stream] Conectando a OpenAI Realtime (modelo ${sessionConfig.model})...`);
 
@@ -126,22 +85,8 @@ function registerTwilioMediaStreamHandler(wss) {
             // (interrupt_response), pero el audio que ya le mandamos a
             // Twilio sigue en su buffer de reproduccion -- sin este "clear"
             // el agente seguiria sonando varios segundos despues de que
-            // deberia haberse callado. Tambien corta el filler si seguia sonando.
+            // deberia haberse callado.
             onInterrupt: () => {
-              stopFiller();
-              if (twilioSocket.readyState === WebSocket.OPEN) {
-                twilioSocket.send(JSON.stringify({ event: 'clear', streamSid }));
-              }
-            },
-            // El usuario acaba de terminar su turno -- arranca el filler ya
-            // mismo, sin esperar a que OpenAI termine de "pensar" la
-            // respuesta real.
-            onSpeechStopped: () => startFiller(),
-            // Ya llego el primer audio real de la respuesta: corta el
-            // filler y limpia lo que Twilio tuviera en cola de el, para que
-            // no se solape con la respuesta real.
-            onFirstAudioOfTurn: () => {
-              stopFiller();
               if (twilioSocket.readyState === WebSocket.OPEN) {
                 twilioSocket.send(JSON.stringify({ event: 'clear', streamSid }));
               }
@@ -170,7 +115,6 @@ function registerTwilioMediaStreamHandler(wss) {
 
         case 'stop': {
           console.log(`[twilio-stream] stop callLogId=${callLogId}`);
-          stopFiller();
           if (openaiSocket) openaiSocket.close();
 
           if (callLogId) {
@@ -189,7 +133,6 @@ function registerTwilioMediaStreamHandler(wss) {
     });
 
     twilioSocket.on('close', () => {
-      stopFiller();
       if (openaiSocket) openaiSocket.close();
     });
   });
@@ -205,10 +148,7 @@ function registerTwilioMediaStreamHandler(wss) {
 // una vez la conversacion ya esta en curso.
 const INTERRUPT_GRACE_PERIOD_MS = 1200;
 
-function connectToOpenAIRealtime(
-  sessionConfig,
-  { onAudioDelta, onTranscriptDelta, onInterrupt, onSpeechStopped, onFirstAudioOfTurn }
-) {
+function connectToOpenAIRealtime(sessionConfig, { onAudioDelta, onTranscriptDelta, onInterrupt }) {
   // "model" solo va en la URL de conexion -- el resto de sessionConfig
   // (voice/instructions/modalities/turn_detection/tools) es el payload de
   // session.update.
@@ -254,12 +194,9 @@ function connectToOpenAIRealtime(
     // el audio y su transcripcion van bajo "output_audio".
     if (event.type === 'response.output_audio.delta' && event.delta) {
       audioDeltaCount += 1;
-      if (firstDeltaOfTurn) {
-        if (turnStartedAt) {
-          console.log(`[openai-realtime] latencia hasta primer audio: ${Date.now() - turnStartedAt}ms`);
-        }
+      if (firstDeltaOfTurn && turnStartedAt) {
+        console.log(`[openai-realtime] latencia hasta primer audio: ${Date.now() - turnStartedAt}ms`);
         firstDeltaOfTurn = false;
-        onFirstAudioOfTurn();
       }
       if (audioDeltaCount === 1 || audioDeltaCount % 50 === 0) {
         console.log(`[openai-realtime] audio delta #${audioDeltaCount}`);
@@ -280,7 +217,6 @@ function connectToOpenAIRealtime(
     if (event.type === 'input_audio_buffer.speech_stopped') {
       turnStartedAt = Date.now();
       firstDeltaOfTurn = true;
-      onSpeechStopped();
     }
     if (event.type === 'error') {
       console.error('[openai-realtime] Evento de error:', JSON.stringify(event));
