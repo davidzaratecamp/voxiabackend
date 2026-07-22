@@ -39,6 +39,13 @@ const env = {
     webhookSecret: process.env.OPENAI_SIP_WEBHOOK_SECRET || '',
   },
 
+  // Proveedor de prueba (ver services/telephony/elevenLabsTwilioProvider.js)
+  // -- necesario solo si "elevenlabs_twilio" esta en TELEPHONY_PROVIDERS.
+  elevenlabs: {
+    apiKey: process.env.ELEVENLABS_API_KEY || '',
+    agentId: process.env.ELEVENLABS_AGENT_ID || '',
+  },
+
   jwt: {
     secret: process.env.JWT_SECRET || '',
     expiresIn: process.env.JWT_EXPIRES_IN || '12h',

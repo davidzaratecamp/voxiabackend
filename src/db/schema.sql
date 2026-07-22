@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS organizations (
   -- Proveedor de telefonia fijo de este cliente, asignado por el admin al
   -- darlo de alta. Debe estar dentro del set habilitado por
   -- TELEPHONY_PROVIDERS en .env (ver providerFactory.js).
-  telephony_provider ENUM('twilio_realtime', 'openai_native_sip') NOT NULL,
+  telephony_provider ENUM('twilio_realtime', 'openai_native_sip', 'elevenlabs_twilio') NOT NULL,
 
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   -- server-side en campaignController.create al momento de crear la
   -- campana (ver comentario en ese archivo) -- nunca lo escribas desde
   -- otro lugar o se puede desincronizar del proveedor real del cliente.
-  telephony_provider ENUM('twilio_realtime', 'openai_native_sip') NOT NULL,
+  telephony_provider ENUM('twilio_realtime', 'openai_native_sip', 'elevenlabs_twilio') NOT NULL,
 
   voice VARCHAR(50) NOT NULL DEFAULT 'alloy',
 
@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS call_logs (
   contact_id INT NOT NULL,
   campaign_id INT NOT NULL,
 
-  telephony_provider ENUM('twilio_realtime', 'openai_native_sip') NOT NULL,
+  telephony_provider ENUM('twilio_realtime', 'openai_native_sip', 'elevenlabs_twilio') NOT NULL,
 
   -- Call SID de Twilio o call_id de OpenAI, segun el proveedor
   external_call_id VARCHAR(120) DEFAULT NULL,

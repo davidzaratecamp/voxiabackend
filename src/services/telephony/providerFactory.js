@@ -1,10 +1,15 @@
 const env = require('../../config/env');
 const TwilioRealtimeProvider = require('./twilioRealtimeProvider');
 const OpenAISipProvider = require('./openaiSipProvider');
+const ElevenLabsTwilioProvider = require('./elevenLabsTwilioProvider');
 
 const PROVIDER_CLASSES = {
   twilio_realtime: TwilioRealtimeProvider,
   openai_native_sip: OpenAISipProvider,
+  // Proveedor de prueba (ver elevenLabsTwilioProvider.js) -- origina la
+  // llamada igual que twilio_realtime, pero el puente de audio en
+  // twilioMediaStreamHandler.js conecta a ElevenLabs en vez de OpenAI.
+  elevenlabs_twilio: ElevenLabsTwilioProvider,
 };
 
 const registry = new Map();

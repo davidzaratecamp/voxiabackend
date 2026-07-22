@@ -26,7 +26,8 @@ const promptBuilder = require('../services/promptBuilder');
 function registerTwilioMediaStreamHandler(wss) {
   wss.on('connection', (twilioSocket) => {
     console.log('[twilio-stream] Conexion WS entrante.');
-    let openaiSocket = null;
+    let realtimeSocket = null;
+    let activeProvider = null;
     let streamSid = null;
     let callLogId = null;
     let transcriptBuffer = '';
@@ -62,10 +63,9 @@ function registerTwilioMediaStreamHandler(wss) {
 
           const contact = await contactModel.findById(params.contactId);
           const campaign = await campaignModel.findById(contact.campaign_id);
-          const sessionConfig = promptBuilder.buildSessionConfig({ campaign, contact });
-          console.log(`[twilio-stream] Conectando a OpenAI Realtime (modelo ${sessionConfig.model})...`);
+          activeProvider = campaign.telephony_provider;
 
-          openaiSocket = connectToOpenAIRealtime(sessionConfig, {
+          const callbacks = {
             onAudioDelta: (base64Audio) => {
               if (twilioSocket.readyState === WebSocket.OPEN) {
                 twilioSocket.send(
@@ -81,17 +81,32 @@ function registerTwilioMediaStreamHandler(wss) {
               transcriptBuffer += text;
             },
             // El interlocutor empezo a hablar mientras el agente hablaba.
-            // OpenAI deja de generar audio nuevo por su cuenta
-            // (interrupt_response), pero el audio que ya le mandamos a
-            // Twilio sigue en su buffer de reproduccion -- sin este "clear"
-            // el agente seguiria sonando varios segundos despues de que
-            // deberia haberse callado.
+            // Ambos backends dejan de generar audio nuevo por su cuenta,
+            // pero el audio que ya le mandamos a Twilio sigue en su buffer
+            // de reproduccion -- sin este "clear" el agente seguiria
+            // sonando varios segundos despues de que deberia haberse
+            // callado.
             onInterrupt: () => {
               if (twilioSocket.readyState === WebSocket.OPEN) {
                 twilioSocket.send(JSON.stringify({ event: 'clear', streamSid }));
               }
             },
-          });
+          };
+
+          try {
+            if (activeProvider === 'elevenlabs_twilio') {
+              console.log('[twilio-stream] Conectando a ElevenLabs Conversational AI...');
+              realtimeSocket = await connectToElevenLabsRealtime(contact, callbacks);
+            } else {
+              const sessionConfig = promptBuilder.buildSessionConfig({ campaign, contact });
+              console.log(`[twilio-stream] Conectando a OpenAI Realtime (modelo ${sessionConfig.model})...`);
+              realtimeSocket = connectToOpenAIRealtime(sessionConfig, callbacks);
+            }
+          } catch (err) {
+            console.error(`[twilio-stream] Error conectando al backend de voz (${activeProvider}):`, err.message);
+            twilioSocket.close();
+            return;
+          }
           break;
         }
 
@@ -99,23 +114,24 @@ function registerTwilioMediaStreamHandler(wss) {
           mediaFromTwilioCount += 1;
           if (mediaFromTwilioCount === 1 || mediaFromTwilioCount % 100 === 0) {
             console.log(
-              `[twilio-stream] media #${mediaFromTwilioCount} de Twilio (openaiSocket ${openaiSocket ? openaiSocket.readyState : 'null'})`
+              `[twilio-stream] media #${mediaFromTwilioCount} de Twilio (realtimeSocket ${realtimeSocket ? realtimeSocket.readyState : 'null'})`
             );
           }
-          if (openaiSocket && openaiSocket.readyState === WebSocket.OPEN) {
-            openaiSocket.send(
-              JSON.stringify({
-                type: 'input_audio_buffer.append',
-                audio: event.media.payload,
-              })
-            );
+          if (realtimeSocket && realtimeSocket.readyState === WebSocket.OPEN) {
+            // Cada backend espera su propio shape de mensaje para el audio
+            // entrante -- ver connectToElevenLabsRealtime/connectToOpenAIRealtime.
+            const payload =
+              activeProvider === 'elevenlabs_twilio'
+                ? JSON.stringify({ user_audio_chunk: event.media.payload })
+                : JSON.stringify({ type: 'input_audio_buffer.append', audio: event.media.payload });
+            realtimeSocket.send(payload);
           }
           break;
         }
 
         case 'stop': {
           console.log(`[twilio-stream] stop callLogId=${callLogId}`);
-          if (openaiSocket) openaiSocket.close();
+          if (realtimeSocket) realtimeSocket.close();
 
           if (callLogId) {
             const durationSeconds = callStartedAt ? Math.round((Date.now() - callStartedAt) / 1000) : 0;
@@ -133,7 +149,7 @@ function registerTwilioMediaStreamHandler(wss) {
     });
 
     twilioSocket.on('close', () => {
-      if (openaiSocket) openaiSocket.close();
+      if (realtimeSocket) realtimeSocket.close();
     });
   });
 }
@@ -229,6 +245,97 @@ function connectToOpenAIRealtime(sessionConfig, { onAudioDelta, onTranscriptDelt
 
   socket.on('error', (err) => {
     console.error('[openai-realtime] Error de socket:', err.message);
+  });
+
+  return socket;
+}
+
+// Pide una signed URL de un solo uso para conectar al agente -- asi la API
+// key de ElevenLabs nunca viaja en la URL del WebSocket. Ver
+// GET /v1/convai/conversation/get_signed_url en la documentacion de
+// ElevenLabs Conversational AI.
+async function fetchElevenLabsSignedUrl() {
+  const url = `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${encodeURIComponent(
+    env.elevenlabs.agentId
+  )}`;
+  const response = await fetch(url, { headers: { 'xi-api-key': env.elevenlabs.apiKey } });
+  if (!response.ok) {
+    throw new Error(`ElevenLabs get_signed_url fallo (${response.status}): ${await response.text()}`);
+  }
+  const data = await response.json();
+  return data.signed_url;
+}
+
+/**
+ * Puente hacia ElevenLabs Conversational AI -- alterno de PRUEBA a
+ * connectToOpenAIRealtime. Mismo formato de audio (ulaw_8000) que Twilio,
+ * asi que no requiere transcodificacion, pero eso hay que configurarlo del
+ * lado del agente en el dashboard de ElevenLabs (formato de entrada/salida
+ * de audio = mu-law 8kHz) -- Voxia no lo controla desde aqui.
+ *
+ * La personalidad/guion del agente vive configurada en ElevenLabs
+ * (agent_id), no en campaign.system_prompt_template -- aqui solo se pasan
+ * dynamic_variables para que el prompt del agente pueda interpolar
+ * {{full_name}}/{{phone_number}}/{{balance_due}} si los usa. A diferencia
+ * de OpenAI, esta integracion NO reescribe el prompt completo desde Voxia.
+ *
+ * Superficie verificada contra la documentacion de ElevenLabs en 2026-07 --
+ * como toda API de terceros en evolucion, revisar shape de mensajes si algo
+ * deja de funcionar (mismo espiritu que la nota sobre el webhook SIP nativo
+ * de OpenAI en openaiSipProvider.js).
+ */
+async function connectToElevenLabsRealtime(contact, { onAudioDelta, onTranscriptDelta, onInterrupt }) {
+  if (!env.elevenlabs.apiKey || !env.elevenlabs.agentId) {
+    throw new Error('Credenciales de ElevenLabs no configuradas (ELEVENLABS_API_KEY / ELEVENLABS_AGENT_ID).');
+  }
+
+  const signedUrl = await fetchElevenLabsSignedUrl();
+  const socket = new WebSocket(signedUrl);
+
+  socket.on('open', () => {
+    console.log('[elevenlabs-realtime] Socket abierto, enviando conversation_initiation_client_data.');
+    socket.send(
+      JSON.stringify({
+        type: 'conversation_initiation_client_data',
+        dynamic_variables: {
+          full_name: contact.full_name || '',
+          phone_number: contact.phone_number,
+          balance_due: contact.balance_due ?? '',
+        },
+      })
+    );
+  });
+
+  socket.on('message', (raw) => {
+    const event = JSON.parse(raw.toString());
+
+    if (event.type === 'audio' && event.audio_event?.audio_base_64) {
+      onAudioDelta(event.audio_event.audio_base_64);
+    }
+    if (event.type === 'interruption') {
+      onInterrupt();
+    }
+    // Texto hablado por el agente (equivalente a la transcripcion de
+    // salida que OpenAI entrega via response.output_audio_transcript.delta).
+    if (event.type === 'agent_response' && event.agent_response_event?.agent_response) {
+      onTranscriptDelta(event.agent_response_event.agent_response);
+    }
+    // ElevenLabs espera un "pong" por cada "ping" para mantener la
+    // conexion viva -- sin esto el socket se cierra por timeout.
+    if (event.type === 'ping' && event.ping_event?.event_id) {
+      socket.send(JSON.stringify({ type: 'pong', event_id: event.ping_event.event_id }));
+    }
+    if (event.type === 'client_error') {
+      console.error('[elevenlabs-realtime] Evento de error:', JSON.stringify(event));
+    }
+  });
+
+  socket.on('close', (code, reason) => {
+    console.log(`[elevenlabs-realtime] Socket cerrado. code=${code} reason=${reason?.toString()}`);
+  });
+
+  socket.on('error', (err) => {
+    console.error('[elevenlabs-realtime] Error de socket:', err.message);
   });
 
   return socket;
