@@ -306,10 +306,29 @@ async function connectToElevenLabsRealtime(contact, { onAudioDelta, onTranscript
     );
   });
 
+  // Misma instrumentacion de latencia que connectToOpenAIRealtime, para
+  // poder comparar numeros reales entre los dos proveedores en vez de
+  // adivinar. OJO con la comparacion: ElevenLabs no expone un evento de
+  // "el usuario dejo de hablar" por separado del transcript -- aqui el
+  // reloj arranca cuando llega user_transcript (transcripcion YA lista),
+  // mientras que en OpenAI arranca en speech_stopped (antes de transcribir
+  // nada). Eso hace que el numero medido aqui salga un poco MEJOR (mas
+  // corto) de lo que seria una comparacion 100% equivalente -- el tiempo
+  // real de "silencio a audio" en ElevenLabs es ese numero mas lo que tarde
+  // su propio STT en transcribir, que no vemos desde aqui.
+  let turnStartedAt = null;
+  let firstDeltaOfTurn = true;
+
   socket.on('message', (raw) => {
     const event = JSON.parse(raw.toString());
 
     if (event.type === 'audio' && event.audio_event?.audio_base_64) {
+      if (firstDeltaOfTurn) {
+        if (turnStartedAt) {
+          console.log(`[elevenlabs-realtime] latencia hasta primer audio: ${Date.now() - turnStartedAt}ms`);
+        }
+        firstDeltaOfTurn = false;
+      }
       onAudioDelta(event.audio_event.audio_base_64);
     }
     if (event.type === 'interruption') {
@@ -319,6 +338,10 @@ async function connectToElevenLabsRealtime(contact, { onAudioDelta, onTranscript
     // salida que OpenAI entrega via response.output_audio_transcript.delta).
     if (event.type === 'agent_response' && event.agent_response_event?.agent_response) {
       onTranscriptDelta(event.agent_response_event.agent_response);
+    }
+    if (event.type === 'user_transcript' && event.user_transcription_event?.user_transcript) {
+      turnStartedAt = Date.now();
+      firstDeltaOfTurn = true;
     }
     // ElevenLabs espera un "pong" por cada "ping" para mantener la
     // conexion viva -- sin esto el socket se cierra por timeout.
