@@ -5,6 +5,7 @@ const campaignModel = require('../models/campaignModel');
 const callLogModel = require('../models/callLogModel');
 const callOrchestrator = require('../services/callOrchestrator');
 const promptBuilder = require('../services/promptBuilder');
+const audioCodec = require('../services/telephony/audioCodec');
 
 /**
  * Puente de audio bidireccional Twilio Media Streams <-> OpenAI Realtime.
@@ -97,6 +98,9 @@ function registerTwilioMediaStreamHandler(wss) {
             if (activeProvider === 'elevenlabs_twilio') {
               console.log('[twilio-stream] Conectando a ElevenLabs Conversational AI...');
               realtimeSocket = await connectToElevenLabsRealtime(contact, callbacks);
+            } else if (activeProvider === 'hume_evi_twilio') {
+              console.log('[twilio-stream] Conectando a Hume EVI...');
+              realtimeSocket = await connectToHumeRealtime(contact, callbacks);
             } else {
               const sessionConfig = promptBuilder.buildSessionConfig({ campaign, contact });
               console.log(`[twilio-stream] Conectando a OpenAI Realtime (modelo ${sessionConfig.model})...`);
@@ -118,12 +122,20 @@ function registerTwilioMediaStreamHandler(wss) {
             );
           }
           if (realtimeSocket && realtimeSocket.readyState === WebSocket.OPEN) {
-            // Cada backend espera su propio shape de mensaje para el audio
-            // entrante -- ver connectToElevenLabsRealtime/connectToOpenAIRealtime.
-            const payload =
-              activeProvider === 'elevenlabs_twilio'
-                ? JSON.stringify({ user_audio_chunk: event.media.payload })
-                : JSON.stringify({ type: 'input_audio_buffer.append', audio: event.media.payload });
+            // Cada backend espera su propio shape de mensaje (y a veces su
+            // propio formato de audio) para el audio entrante -- ver
+            // connectToOpenAIRealtime/connectToElevenLabsRealtime/connectToHumeRealtime.
+            let payload;
+            if (activeProvider === 'elevenlabs_twilio') {
+              payload = JSON.stringify({ user_audio_chunk: event.media.payload });
+            } else if (activeProvider === 'hume_evi_twilio') {
+              // Unico de los 3 proveedores que no acepta mu-law -- se
+              // transcodifica a PCM16 antes de mandarlo (ver audioCodec.js).
+              const pcm16Base64 = audioCodec.twilioMuLawToHumePcm16Base64(event.media.payload);
+              payload = JSON.stringify({ type: 'audio_input', data: pcm16Base64 });
+            } else {
+              payload = JSON.stringify({ type: 'input_audio_buffer.append', audio: event.media.payload });
+            }
             realtimeSocket.send(payload);
           }
           break;
@@ -359,6 +371,107 @@ async function connectToElevenLabsRealtime(contact, { onAudioDelta, onTranscript
 
   socket.on('error', (err) => {
     console.error('[elevenlabs-realtime] Error de socket:', err.message);
+  });
+
+  return socket;
+}
+
+/**
+ * Puente hacia Hume EVI -- alterno de PRUEBA a connectToOpenAIRealtime,
+ * igual que ElevenLabs. A diferencia de OpenAI y ElevenLabs (que aceptan
+ * mu-law 8kHz directamente), Hume NO soporta mu-law -- solo linear16 (PCM).
+ * Por eso, a diferencia de los otros dos puentes, aqui SI hace falta
+ * transcodificar en ambas direcciones (ver audioCodec.js):
+ *   Twilio (mu-law 8kHz) -> Hume (linear16 8kHz): en el caso 'media' de
+ *     arriba, via audioCodec.twilioMuLawToHumePcm16Base64.
+ *   Hume (WAV linear16, documentado a 48kHz) -> Twilio (mu-law 8kHz): aqui
+ *     abajo, via audioCodec.humeWavToTwilioMuLaw (incluye el downsample).
+ *
+ * Autenticacion: HUME_API_KEY directo como query param (soportado segun
+ * la documentacion de Hume para este endpoint) -- no se usa el flujo de
+ * access_token (Basic auth con API key + Secret key) porque esto corre
+ * enteramente en el servidor, nunca se expone al cliente.
+ *
+ * Personalizacion: a diferencia del flujo "nativo" de Hume con Twilio
+ * (donde Hume origina/maneja todo pero no hay forma de inyectar variables
+ * por contacto), aqui Voxia mantiene el control de la llamada (Twilio
+ * conecta a NUESTRO stream, ver humeTwilioProvider.js) y manda
+ * full_name/phone_number/balance_due via session_settings.variables para
+ * que el prompt de Hume (configurado en su dashboard, con placeholders
+ * {{full_name}} etc.) los pueda interpolar.
+ *
+ * Superficie verificada contra la documentacion de Hume en 2026-07 -- como
+ * toda API de terceros en evolucion, revisar shape de mensajes si algo deja
+ * de funcionar (mismo espiritu que la nota sobre el webhook SIP nativo de
+ * OpenAI en openaiSipProvider.js).
+ */
+async function connectToHumeRealtime(contact, { onAudioDelta, onTranscriptDelta, onInterrupt }) {
+  if (!env.hume.apiKey || !env.hume.configId) {
+    throw new Error('Credenciales de Hume no configuradas (HUME_API_KEY / HUME_CONFIG_ID).');
+  }
+
+  const url = `wss://api.hume.ai/v0/evi/chat?config_id=${encodeURIComponent(env.hume.configId)}&api_key=${encodeURIComponent(env.hume.apiKey)}`;
+  const socket = new WebSocket(url);
+
+  socket.on('open', () => {
+    console.log('[hume-realtime] Socket abierto, enviando session_settings.');
+    socket.send(
+      JSON.stringify({
+        type: 'session_settings',
+        audio: { encoding: 'linear16', sample_rate: 8000, channels: 1 },
+        variables: {
+          full_name: contact.full_name || '',
+          phone_number: contact.phone_number,
+          balance_due: contact.balance_due ?? '',
+        },
+      })
+    );
+  });
+
+  // Misma instrumentacion de latencia que los otros dos proveedores, con
+  // la misma salvedad que ElevenLabs: el reloj arranca en el transcript
+  // final del usuario (user_message con interim=false), no en un evento de
+  // silencio-detectado puro -- Hume tampoco expone ese evento por separado.
+  let turnStartedAt = null;
+  let firstDeltaOfTurn = true;
+
+  socket.on('message', (raw) => {
+    const event = JSON.parse(raw.toString());
+
+    if (event.type === 'audio_output' && event.data) {
+      if (firstDeltaOfTurn) {
+        if (turnStartedAt) {
+          console.log(`[hume-realtime] latencia hasta primer audio: ${Date.now() - turnStartedAt}ms`);
+        }
+        firstDeltaOfTurn = false;
+      }
+      const wavBuffer = Buffer.from(event.data, 'base64');
+      const muLawBuffer = audioCodec.humeWavToTwilioMuLaw(wavBuffer, 8000);
+      onAudioDelta(muLawBuffer.toString('base64'));
+    }
+    if (event.type === 'user_interruption') {
+      onInterrupt();
+    }
+    // Texto hablado por el agente (equivalente a la transcripcion de
+    // salida de los otros dos proveedores).
+    if (event.type === 'assistant_message' && event.message?.content) {
+      onTranscriptDelta(event.message.content);
+    }
+    if (event.type === 'user_message' && event.interim === false) {
+      turnStartedAt = Date.now();
+      firstDeltaOfTurn = true;
+    }
+    if (event.type === 'error') {
+      console.error('[hume-realtime] Evento de error:', JSON.stringify(event));
+    }
+  });
+
+  socket.on('close', (code, reason) => {
+    console.log(`[hume-realtime] Socket cerrado. code=${code} reason=${reason?.toString()}`);
+  });
+
+  socket.on('error', (err) => {
+    console.error('[hume-realtime] Error de socket:', err.message);
   });
 
   return socket;
