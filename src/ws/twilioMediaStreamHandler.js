@@ -413,6 +413,40 @@ async function connectToHumeRealtime(contact, { onAudioDelta, onTranscriptDelta,
   const url = `wss://api.hume.ai/v0/evi/chat?config_id=${encodeURIComponent(env.hume.configId)}&api_key=${encodeURIComponent(env.hume.apiKey)}`;
   const socket = new WebSocket(url);
 
+  // A diferencia de OpenAI/ElevenLabs (que entregan sus deltas de audio ya
+  // en trozos pequenos, listos para reenviar tal cual -- ver comentario al
+  // inicio del archivo sobre por que NO conviene re-trocear esos dos),
+  // cada audio_output de Hume puede traer un segmento grande (a veces mas
+  // de un segundo entero de audio en un solo mensaje). Mandarlo a Twilio de
+  // una sola vez en un solo evento "media" es la causa clasica de audio que
+  // suena entrecortado/mecanico en integraciones de Media Streams -- Twilio
+  // espera un flujo continuo de frames pequenos a ritmo real (~20ms cada
+  // uno), no rafagas. Por eso aqui SI hace falta una cola con temporizador
+  // propio, a diferencia de los otros dos proveedores.
+  const FRAME_BYTES = 160; // 20ms de mu-law 8kHz (1 byte/muestra)
+  const FRAME_MS = 20;
+  let playbackQueue = Buffer.alloc(0);
+  let playbackOffset = 0;
+
+  const playbackTimer = setInterval(() => {
+    if (playbackOffset >= playbackQueue.length) return;
+    const frame = playbackQueue.subarray(playbackOffset, playbackOffset + FRAME_BYTES);
+    playbackOffset += FRAME_BYTES;
+    onAudioDelta(frame.toString('base64'));
+  }, FRAME_MS);
+
+  function enqueueAudio(muLawBuffer) {
+    // Descarta lo ya reproducido antes de concatenar, para no dejar crecer
+    // el buffer indefinidamente durante una llamada larga.
+    playbackQueue = Buffer.concat([playbackQueue.subarray(playbackOffset), muLawBuffer]);
+    playbackOffset = 0;
+  }
+
+  function clearPlaybackQueue() {
+    playbackQueue = Buffer.alloc(0);
+    playbackOffset = 0;
+  }
+
   socket.on('open', () => {
     console.log('[hume-realtime] Socket abierto, enviando session_settings.');
     socket.send(
@@ -453,9 +487,10 @@ async function connectToHumeRealtime(contact, { onAudioDelta, onTranscriptDelta,
       }
       const wavBuffer = Buffer.from(event.data, 'base64');
       const muLawBuffer = audioCodec.humeWavToTwilioMuLaw(wavBuffer, 8000);
-      onAudioDelta(muLawBuffer.toString('base64'));
+      enqueueAudio(muLawBuffer);
     }
     if (event.type === 'user_interruption') {
+      clearPlaybackQueue();
       onInterrupt();
     }
     // Texto hablado por el agente (equivalente a la transcripcion de
@@ -473,10 +508,12 @@ async function connectToHumeRealtime(contact, { onAudioDelta, onTranscriptDelta,
   });
 
   socket.on('close', (code, reason) => {
+    clearInterval(playbackTimer);
     console.log(`[hume-realtime] Socket cerrado. code=${code} reason=${reason?.toString()}`);
   });
 
   socket.on('error', (err) => {
+    clearInterval(playbackTimer);
     console.error('[hume-realtime] Error de socket:', err.message);
   });
 
