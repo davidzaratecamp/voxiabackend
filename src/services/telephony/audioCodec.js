@@ -57,24 +57,55 @@ function pcm16ToMuLawBuffer(pcm16) {
   return out;
 }
 
+// Filtro paso-bajo de un polo (RC), aplicado en cascada varias veces para
+// aproximar un filtro de orden mayor con mejor caida en la banda de
+// rechazo. Sin esto (la version anterior solo promediaba N muestras
+// consecutivas, un filtro muy debil), el contenido por encima de la nueva
+// frecuencia de Nyquist se "dobla" hacia abajo (aliasing) en vez de
+// eliminarse -- eso suena metalico/granuloso, facil de confundir con "la
+// IA suena robotica" cuando en realidad es un artefacto de la conversion
+// de audio, no de la voz real del proveedor.
+function onePoleLowPass(signal, sampleRate, cutoffHz) {
+  const alpha = 1 - Math.exp((-2 * Math.PI * cutoffHz) / sampleRate);
+  const out = new Float64Array(signal.length);
+  let prev = signal.length > 0 ? signal[0] : 0;
+  for (let i = 0; i < signal.length; i++) {
+    prev += alpha * (signal[i] - prev);
+    out[i] = prev;
+  }
+  return out;
+}
+
+function lowPassFilter(pcm16, sampleRate, cutoffHz, passes = 4) {
+  let signal = Float64Array.from(pcm16);
+  for (let p = 0; p < passes; p++) {
+    signal = onePoleLowPass(signal, sampleRate, cutoffHz);
+  }
+  return signal;
+}
+
 /**
- * Remuestrea PCM16 por decimacion con promedio simple (no es un resampler
- * de calidad de estudio, pero es mas que suficiente para voz telefonica y
- * evita el aliasing peor que dejaria una decimacion "a lo bruto" tomando
- * una muestra de cada N). fromRate debe ser multiplo entero de toRate.
+ * Remuestrea PCM16 aplicando primero un paso-bajo anti-aliasing (ver
+ * lowPassFilter) y despues decimando -- a diferencia de la version
+ * original (que solo promediaba N muestras, un filtro demasiado debil
+ * para el contenido de voz). fromRate debe ser multiplo entero de toRate.
  */
 function downsamplePcm16(pcm16, fromRate, toRate) {
   const ratio = fromRate / toRate;
   if (!Number.isInteger(ratio)) {
     throw new Error(`downsamplePcm16: ${fromRate} no es multiplo entero de ${toRate}.`);
   }
+
+  // Corta un poco antes de la Nyquist del destino (toRate/2) para dejar
+  // margen de transicion al filtro de un polo, que no cae de golpe.
+  const cutoffHz = toRate / 2 - 400;
+  const filtered = lowPassFilter(pcm16, fromRate, cutoffHz, 4);
+
   const outLength = Math.floor(pcm16.length / ratio);
   const out = new Int16Array(outLength);
   for (let i = 0; i < outLength; i++) {
-    let sum = 0;
-    const start = i * ratio;
-    for (let j = 0; j < ratio; j++) sum += pcm16[start + j];
-    out[i] = Math.round(sum / ratio);
+    const sample = Math.round(filtered[i * ratio]);
+    out[i] = Math.max(-32768, Math.min(32767, sample));
   }
   return out;
 }
@@ -162,6 +193,7 @@ module.exports = {
   muLawBufferToPcm16,
   pcm16ToMuLawBuffer,
   downsamplePcm16,
+  lowPassFilter,
   parseWav,
   humeWavToTwilioMuLaw,
   twilioMuLawToHumePcm16Base64,
