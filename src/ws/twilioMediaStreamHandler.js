@@ -438,6 +438,12 @@ async function connectToHumeRealtime(contact, { onAudioDelta, onTranscriptDelta,
   socket.on('message', (raw) => {
     const event = JSON.parse(raw.toString());
 
+    // Diagnostico temporal: loguea CADA tipo de mensaje que manda Hume --
+    // a diferencia de OpenAI/ElevenLabs, aqui todavia no hay suficiente
+    // trafico real observado como para confiar en la lista de eventos
+    // documentada sin verificarla en una llamada real (ver nota mas abajo).
+    console.log(`[hume-realtime] mensaje recibido: type=${event.type}`);
+
     if (event.type === 'audio_output' && event.data) {
       if (firstDeltaOfTurn) {
         if (turnStartedAt) {
