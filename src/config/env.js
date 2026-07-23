@@ -39,24 +39,6 @@ const env = {
     webhookSecret: process.env.OPENAI_SIP_WEBHOOK_SECRET || '',
   },
 
-  // Proveedor de prueba (ver services/telephony/elevenLabsTwilioProvider.js)
-  // -- necesario solo si "elevenlabs_twilio" esta en TELEPHONY_PROVIDERS.
-  elevenlabs: {
-    apiKey: process.env.ELEVENLABS_API_KEY || '',
-    agentId: process.env.ELEVENLABS_AGENT_ID || '',
-  },
-
-  // Proveedor de prueba (ver services/telephony/humeTwilioProvider.js) --
-  // necesario solo si "hume_evi_twilio" esta en TELEPHONY_PROVIDERS.
-  // secretKey no se usa en el flujo actual (autenticacion del WebSocket via
-  // api_key directo, ver ws/twilioMediaStreamHandler.js) -- se guarda por
-  // si mas adelante hace falta el flujo de access_token.
-  hume: {
-    apiKey: process.env.HUME_API_KEY || '',
-    secretKey: process.env.HUME_SECRET_KEY || '',
-    configId: process.env.HUME_CONFIG_ID || '',
-  },
-
   jwt: {
     secret: process.env.JWT_SECRET || '',
     expiresIn: process.env.JWT_EXPIRES_IN || '12h',

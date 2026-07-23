@@ -5,7 +5,6 @@ const campaignModel = require('../models/campaignModel');
 const callLogModel = require('../models/callLogModel');
 const callOrchestrator = require('../services/callOrchestrator');
 const promptBuilder = require('../services/promptBuilder');
-const audioCodec = require('../services/telephony/audioCodec');
 
 /**
  * Puente de audio bidireccional Twilio Media Streams <-> OpenAI Realtime.
@@ -27,8 +26,7 @@ const audioCodec = require('../services/telephony/audioCodec');
 function registerTwilioMediaStreamHandler(wss) {
   wss.on('connection', (twilioSocket) => {
     console.log('[twilio-stream] Conexion WS entrante.');
-    let realtimeSocket = null;
-    let activeProvider = null;
+    let openaiSocket = null;
     let streamSid = null;
     let callLogId = null;
     let transcriptBuffer = '';
@@ -64,9 +62,10 @@ function registerTwilioMediaStreamHandler(wss) {
 
           const contact = await contactModel.findById(params.contactId);
           const campaign = await campaignModel.findById(contact.campaign_id);
-          activeProvider = campaign.telephony_provider;
+          const sessionConfig = promptBuilder.buildSessionConfig({ campaign, contact });
+          console.log(`[twilio-stream] Conectando a OpenAI Realtime (modelo ${sessionConfig.model})...`);
 
-          const callbacks = {
+          openaiSocket = connectToOpenAIRealtime(sessionConfig, {
             onAudioDelta: (base64Audio) => {
               if (twilioSocket.readyState === WebSocket.OPEN) {
                 twilioSocket.send(
@@ -82,35 +81,17 @@ function registerTwilioMediaStreamHandler(wss) {
               transcriptBuffer += text;
             },
             // El interlocutor empezo a hablar mientras el agente hablaba.
-            // Ambos backends dejan de generar audio nuevo por su cuenta,
-            // pero el audio que ya le mandamos a Twilio sigue en su buffer
-            // de reproduccion -- sin este "clear" el agente seguiria
-            // sonando varios segundos despues de que deberia haberse
-            // callado.
+            // OpenAI deja de generar audio nuevo por su cuenta
+            // (interrupt_response), pero el audio que ya le mandamos a
+            // Twilio sigue en su buffer de reproduccion -- sin este "clear"
+            // el agente seguiria sonando varios segundos despues de que
+            // deberia haberse callado.
             onInterrupt: () => {
               if (twilioSocket.readyState === WebSocket.OPEN) {
                 twilioSocket.send(JSON.stringify({ event: 'clear', streamSid }));
               }
             },
-          };
-
-          try {
-            if (activeProvider === 'elevenlabs_twilio') {
-              console.log('[twilio-stream] Conectando a ElevenLabs Conversational AI...');
-              realtimeSocket = await connectToElevenLabsRealtime(contact, callbacks);
-            } else if (activeProvider === 'hume_evi_twilio') {
-              console.log('[twilio-stream] Conectando a Hume EVI...');
-              realtimeSocket = await connectToHumeRealtime(contact, callbacks);
-            } else {
-              const sessionConfig = promptBuilder.buildSessionConfig({ campaign, contact });
-              console.log(`[twilio-stream] Conectando a OpenAI Realtime (modelo ${sessionConfig.model})...`);
-              realtimeSocket = connectToOpenAIRealtime(sessionConfig, callbacks);
-            }
-          } catch (err) {
-            console.error(`[twilio-stream] Error conectando al backend de voz (${activeProvider}):`, err.message);
-            twilioSocket.close();
-            return;
-          }
+          });
           break;
         }
 
@@ -118,32 +99,23 @@ function registerTwilioMediaStreamHandler(wss) {
           mediaFromTwilioCount += 1;
           if (mediaFromTwilioCount === 1 || mediaFromTwilioCount % 100 === 0) {
             console.log(
-              `[twilio-stream] media #${mediaFromTwilioCount} de Twilio (realtimeSocket ${realtimeSocket ? realtimeSocket.readyState : 'null'})`
+              `[twilio-stream] media #${mediaFromTwilioCount} de Twilio (openaiSocket ${openaiSocket ? openaiSocket.readyState : 'null'})`
             );
           }
-          if (realtimeSocket && realtimeSocket.readyState === WebSocket.OPEN) {
-            // Cada backend espera su propio shape de mensaje (y a veces su
-            // propio formato de audio) para el audio entrante -- ver
-            // connectToOpenAIRealtime/connectToElevenLabsRealtime/connectToHumeRealtime.
-            let payload;
-            if (activeProvider === 'elevenlabs_twilio') {
-              payload = JSON.stringify({ user_audio_chunk: event.media.payload });
-            } else if (activeProvider === 'hume_evi_twilio') {
-              // Unico de los 3 proveedores que no acepta mu-law -- se
-              // transcodifica a PCM16 antes de mandarlo (ver audioCodec.js).
-              const pcm16Base64 = audioCodec.twilioMuLawToHumePcm16Base64(event.media.payload);
-              payload = JSON.stringify({ type: 'audio_input', data: pcm16Base64 });
-            } else {
-              payload = JSON.stringify({ type: 'input_audio_buffer.append', audio: event.media.payload });
-            }
-            realtimeSocket.send(payload);
+          if (openaiSocket && openaiSocket.readyState === WebSocket.OPEN) {
+            openaiSocket.send(
+              JSON.stringify({
+                type: 'input_audio_buffer.append',
+                audio: event.media.payload,
+              })
+            );
           }
           break;
         }
 
         case 'stop': {
           console.log(`[twilio-stream] stop callLogId=${callLogId}`);
-          if (realtimeSocket) realtimeSocket.close();
+          if (openaiSocket) openaiSocket.close();
 
           if (callLogId) {
             const durationSeconds = callStartedAt ? Math.round((Date.now() - callStartedAt) / 1000) : 0;
@@ -161,7 +133,7 @@ function registerTwilioMediaStreamHandler(wss) {
     });
 
     twilioSocket.on('close', () => {
-      if (realtimeSocket) realtimeSocket.close();
+      if (openaiSocket) openaiSocket.close();
     });
   });
 }
@@ -257,264 +229,6 @@ function connectToOpenAIRealtime(sessionConfig, { onAudioDelta, onTranscriptDelt
 
   socket.on('error', (err) => {
     console.error('[openai-realtime] Error de socket:', err.message);
-  });
-
-  return socket;
-}
-
-// Pide una signed URL de un solo uso para conectar al agente -- asi la API
-// key de ElevenLabs nunca viaja en la URL del WebSocket. Ver
-// GET /v1/convai/conversation/get_signed_url en la documentacion de
-// ElevenLabs Conversational AI.
-async function fetchElevenLabsSignedUrl() {
-  const url = `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${encodeURIComponent(
-    env.elevenlabs.agentId
-  )}`;
-  const response = await fetch(url, { headers: { 'xi-api-key': env.elevenlabs.apiKey } });
-  if (!response.ok) {
-    throw new Error(`ElevenLabs get_signed_url fallo (${response.status}): ${await response.text()}`);
-  }
-  const data = await response.json();
-  return data.signed_url;
-}
-
-/**
- * Puente hacia ElevenLabs Conversational AI -- alterno de PRUEBA a
- * connectToOpenAIRealtime. Mismo formato de audio (ulaw_8000) que Twilio,
- * asi que no requiere transcodificacion, pero eso hay que configurarlo del
- * lado del agente en el dashboard de ElevenLabs (formato de entrada/salida
- * de audio = mu-law 8kHz) -- Voxia no lo controla desde aqui.
- *
- * La personalidad/guion del agente vive configurada en ElevenLabs
- * (agent_id), no en campaign.system_prompt_template -- aqui solo se pasan
- * dynamic_variables para que el prompt del agente pueda interpolar
- * {{full_name}}/{{phone_number}}/{{balance_due}} si los usa. A diferencia
- * de OpenAI, esta integracion NO reescribe el prompt completo desde Voxia.
- *
- * Superficie verificada contra la documentacion de ElevenLabs en 2026-07 --
- * como toda API de terceros en evolucion, revisar shape de mensajes si algo
- * deja de funcionar (mismo espiritu que la nota sobre el webhook SIP nativo
- * de OpenAI en openaiSipProvider.js).
- */
-async function connectToElevenLabsRealtime(contact, { onAudioDelta, onTranscriptDelta, onInterrupt }) {
-  if (!env.elevenlabs.apiKey || !env.elevenlabs.agentId) {
-    throw new Error('Credenciales de ElevenLabs no configuradas (ELEVENLABS_API_KEY / ELEVENLABS_AGENT_ID).');
-  }
-
-  const signedUrl = await fetchElevenLabsSignedUrl();
-  const socket = new WebSocket(signedUrl);
-
-  socket.on('open', () => {
-    console.log('[elevenlabs-realtime] Socket abierto, enviando conversation_initiation_client_data.');
-    socket.send(
-      JSON.stringify({
-        type: 'conversation_initiation_client_data',
-        dynamic_variables: {
-          full_name: contact.full_name || '',
-          phone_number: contact.phone_number,
-          balance_due: contact.balance_due ?? '',
-        },
-      })
-    );
-  });
-
-  // Misma instrumentacion de latencia que connectToOpenAIRealtime, para
-  // poder comparar numeros reales entre los dos proveedores en vez de
-  // adivinar. OJO con la comparacion: ElevenLabs no expone un evento de
-  // "el usuario dejo de hablar" por separado del transcript -- aqui el
-  // reloj arranca cuando llega user_transcript (transcripcion YA lista),
-  // mientras que en OpenAI arranca en speech_stopped (antes de transcribir
-  // nada). Eso hace que el numero medido aqui salga un poco MEJOR (mas
-  // corto) de lo que seria una comparacion 100% equivalente -- el tiempo
-  // real de "silencio a audio" en ElevenLabs es ese numero mas lo que tarde
-  // su propio STT en transcribir, que no vemos desde aqui.
-  let turnStartedAt = null;
-  let firstDeltaOfTurn = true;
-
-  socket.on('message', (raw) => {
-    const event = JSON.parse(raw.toString());
-
-    if (event.type === 'audio' && event.audio_event?.audio_base_64) {
-      if (firstDeltaOfTurn) {
-        if (turnStartedAt) {
-          console.log(`[elevenlabs-realtime] latencia hasta primer audio: ${Date.now() - turnStartedAt}ms`);
-        }
-        firstDeltaOfTurn = false;
-      }
-      onAudioDelta(event.audio_event.audio_base_64);
-    }
-    if (event.type === 'interruption') {
-      onInterrupt();
-    }
-    // Texto hablado por el agente (equivalente a la transcripcion de
-    // salida que OpenAI entrega via response.output_audio_transcript.delta).
-    if (event.type === 'agent_response' && event.agent_response_event?.agent_response) {
-      onTranscriptDelta(event.agent_response_event.agent_response);
-    }
-    if (event.type === 'user_transcript' && event.user_transcription_event?.user_transcript) {
-      turnStartedAt = Date.now();
-      firstDeltaOfTurn = true;
-    }
-    // ElevenLabs espera un "pong" por cada "ping" para mantener la
-    // conexion viva -- sin esto el socket se cierra por timeout.
-    if (event.type === 'ping' && event.ping_event?.event_id) {
-      socket.send(JSON.stringify({ type: 'pong', event_id: event.ping_event.event_id }));
-    }
-    if (event.type === 'client_error') {
-      console.error('[elevenlabs-realtime] Evento de error:', JSON.stringify(event));
-    }
-  });
-
-  socket.on('close', (code, reason) => {
-    console.log(`[elevenlabs-realtime] Socket cerrado. code=${code} reason=${reason?.toString()}`);
-  });
-
-  socket.on('error', (err) => {
-    console.error('[elevenlabs-realtime] Error de socket:', err.message);
-  });
-
-  return socket;
-}
-
-/**
- * Puente hacia Hume EVI -- alterno de PRUEBA a connectToOpenAIRealtime,
- * igual que ElevenLabs. A diferencia de OpenAI y ElevenLabs (que aceptan
- * mu-law 8kHz directamente), Hume NO soporta mu-law -- solo linear16 (PCM).
- * Por eso, a diferencia de los otros dos puentes, aqui SI hace falta
- * transcodificar en ambas direcciones (ver audioCodec.js):
- *   Twilio (mu-law 8kHz) -> Hume (linear16 8kHz): en el caso 'media' de
- *     arriba, via audioCodec.twilioMuLawToHumePcm16Base64.
- *   Hume (WAV linear16, documentado a 48kHz) -> Twilio (mu-law 8kHz): aqui
- *     abajo, via audioCodec.humeWavToTwilioMuLaw (incluye el downsample).
- *
- * Autenticacion: HUME_API_KEY directo como query param (soportado segun
- * la documentacion de Hume para este endpoint) -- no se usa el flujo de
- * access_token (Basic auth con API key + Secret key) porque esto corre
- * enteramente en el servidor, nunca se expone al cliente.
- *
- * Personalizacion: a diferencia del flujo "nativo" de Hume con Twilio
- * (donde Hume origina/maneja todo pero no hay forma de inyectar variables
- * por contacto), aqui Voxia mantiene el control de la llamada (Twilio
- * conecta a NUESTRO stream, ver humeTwilioProvider.js) y manda
- * full_name/phone_number/balance_due via session_settings.variables para
- * que el prompt de Hume (configurado en su dashboard, con placeholders
- * {{full_name}} etc.) los pueda interpolar.
- *
- * Superficie verificada contra la documentacion de Hume en 2026-07 -- como
- * toda API de terceros en evolucion, revisar shape de mensajes si algo deja
- * de funcionar (mismo espiritu que la nota sobre el webhook SIP nativo de
- * OpenAI en openaiSipProvider.js).
- */
-async function connectToHumeRealtime(contact, { onAudioDelta, onTranscriptDelta, onInterrupt }) {
-  if (!env.hume.apiKey || !env.hume.configId) {
-    throw new Error('Credenciales de Hume no configuradas (HUME_API_KEY / HUME_CONFIG_ID).');
-  }
-
-  const url = `wss://api.hume.ai/v0/evi/chat?config_id=${encodeURIComponent(env.hume.configId)}&api_key=${encodeURIComponent(env.hume.apiKey)}`;
-  const socket = new WebSocket(url);
-
-  // A diferencia de OpenAI/ElevenLabs (que entregan sus deltas de audio ya
-  // en trozos pequenos, listos para reenviar tal cual -- ver comentario al
-  // inicio del archivo sobre por que NO conviene re-trocear esos dos),
-  // cada audio_output de Hume puede traer un segmento grande (a veces mas
-  // de un segundo entero de audio en un solo mensaje). Mandarlo a Twilio de
-  // una sola vez en un solo evento "media" es la causa clasica de audio que
-  // suena entrecortado/mecanico en integraciones de Media Streams -- Twilio
-  // espera un flujo continuo de frames pequenos a ritmo real (~20ms cada
-  // uno), no rafagas. Por eso aqui SI hace falta una cola con temporizador
-  // propio, a diferencia de los otros dos proveedores.
-  const FRAME_BYTES = 160; // 20ms de mu-law 8kHz (1 byte/muestra)
-  const FRAME_MS = 20;
-  let playbackQueue = Buffer.alloc(0);
-  let playbackOffset = 0;
-
-  const playbackTimer = setInterval(() => {
-    if (playbackOffset >= playbackQueue.length) return;
-    const frame = playbackQueue.subarray(playbackOffset, playbackOffset + FRAME_BYTES);
-    playbackOffset += FRAME_BYTES;
-    onAudioDelta(frame.toString('base64'));
-  }, FRAME_MS);
-
-  function enqueueAudio(muLawBuffer) {
-    // Descarta lo ya reproducido antes de concatenar, para no dejar crecer
-    // el buffer indefinidamente durante una llamada larga.
-    playbackQueue = Buffer.concat([playbackQueue.subarray(playbackOffset), muLawBuffer]);
-    playbackOffset = 0;
-  }
-
-  function clearPlaybackQueue() {
-    playbackQueue = Buffer.alloc(0);
-    playbackOffset = 0;
-  }
-
-  socket.on('open', () => {
-    console.log('[hume-realtime] Socket abierto, enviando session_settings.');
-    socket.send(
-      JSON.stringify({
-        type: 'session_settings',
-        audio: { encoding: 'linear16', sample_rate: 8000, channels: 1 },
-        variables: {
-          full_name: contact.full_name || '',
-          phone_number: contact.phone_number,
-          balance_due: contact.balance_due ?? '',
-        },
-      })
-    );
-  });
-
-  // Misma instrumentacion de latencia que los otros dos proveedores, con
-  // la misma salvedad que ElevenLabs: el reloj arranca en el transcript
-  // final del usuario (user_message con interim=false), no en un evento de
-  // silencio-detectado puro -- Hume tampoco expone ese evento por separado.
-  let turnStartedAt = null;
-  let firstDeltaOfTurn = true;
-
-  socket.on('message', (raw) => {
-    const event = JSON.parse(raw.toString());
-
-    // Diagnostico temporal: loguea CADA tipo de mensaje que manda Hume --
-    // a diferencia de OpenAI/ElevenLabs, aqui todavia no hay suficiente
-    // trafico real observado como para confiar en la lista de eventos
-    // documentada sin verificarla en una llamada real (ver nota mas abajo).
-    console.log(`[hume-realtime] mensaje recibido: type=${event.type}`);
-
-    if (event.type === 'audio_output' && event.data) {
-      if (firstDeltaOfTurn) {
-        if (turnStartedAt) {
-          console.log(`[hume-realtime] latencia hasta primer audio: ${Date.now() - turnStartedAt}ms`);
-        }
-        firstDeltaOfTurn = false;
-      }
-      const wavBuffer = Buffer.from(event.data, 'base64');
-      const muLawBuffer = audioCodec.humeWavToTwilioMuLaw(wavBuffer, 8000);
-      enqueueAudio(muLawBuffer);
-    }
-    if (event.type === 'user_interruption') {
-      clearPlaybackQueue();
-      onInterrupt();
-    }
-    // Texto hablado por el agente (equivalente a la transcripcion de
-    // salida de los otros dos proveedores).
-    if (event.type === 'assistant_message' && event.message?.content) {
-      onTranscriptDelta(event.message.content);
-    }
-    if (event.type === 'user_message' && event.interim === false) {
-      turnStartedAt = Date.now();
-      firstDeltaOfTurn = true;
-    }
-    if (event.type === 'error') {
-      console.error('[hume-realtime] Evento de error:', JSON.stringify(event));
-    }
-  });
-
-  socket.on('close', (code, reason) => {
-    clearInterval(playbackTimer);
-    console.log(`[hume-realtime] Socket cerrado. code=${code} reason=${reason?.toString()}`);
-  });
-
-  socket.on('error', (err) => {
-    clearInterval(playbackTimer);
-    console.error('[hume-realtime] Error de socket:', err.message);
   });
 
   return socket;
