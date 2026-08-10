@@ -12,8 +12,44 @@ CREATE TABLE IF NOT EXISTS organizations (
   -- TELEPHONY_PROVIDERS en .env (ver providerFactory.js).
   telephony_provider ENUM('twilio_realtime', 'openai_native_sip') NOT NULL,
 
+  -- Credenciales Twilio propias de este cliente (si trae su propia cuenta).
+  -- NULL en cualquiera de las dos = usar las credenciales globales del .env
+  -- del backend (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN) -- ver
+  -- twilioRealtimeProvider.js. Asi organizaciones sin cuenta propia siguen
+  -- funcionando exactamente igual que antes de que existieran estos campos.
+  twilio_account_sid VARCHAR(64) DEFAULT NULL,
+  twilio_auth_token VARCHAR(64) DEFAULT NULL,
+
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Pool de numeros propios de una organizacion con cuenta Twilio propia (ver
+-- twilio_account_sid arriba). Cada llamada saliente rota entre los numeros
+-- activos (el que lleva mas tiempo sin usarse sale primero, ver
+-- organizationPhoneNumberModel.claimNextNumber) para no concentrar todo el
+-- volumen de una campana en un solo numero y que los operadores lo marquen
+-- como spam. Una organizacion sin filas aqui simplemente usa el numero
+-- global del .env (TWILIO_FROM_NUMBER), sin cambio de comportamiento.
+CREATE TABLE IF NOT EXISTS organization_phone_numbers (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  organization_id INT NOT NULL,
+  phone_number VARCHAR(20) NOT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+
+  -- Manda la rotacion (ORDER BY use_count ASC, id ASC en claimNextNumber),
+  -- no last_used_at: TIMESTAMP solo tiene resolucion de 1 segundo, y con
+  -- llamadas saliendo mas rapido que eso (caso real: 600 contactos) varios
+  -- claims empatarian en el mismo segundo y el desempate por id repetiria
+  -- siempre el numero de id mas bajo en vez de rotar parejo.
+  use_count INT NOT NULL DEFAULT 0,
+  -- Solo informativo (se muestra en la interfaz), no se usa para ordenar.
+  last_used_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+  CONSTRAINT fk_org_phone_numbers_organization FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+  UNIQUE KEY uq_org_phone_number (organization_id, phone_number),
+  INDEX idx_org_phone_numbers_organization (organization_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS users (
@@ -119,6 +155,12 @@ CREATE TABLE IF NOT EXISTS call_logs (
 
   -- Call SID de Twilio o call_id de OpenAI, segun el proveedor
   external_call_id VARCHAR(120) DEFAULT NULL,
+
+  -- Numero de origen que hizo esta llamada -- solo se llena para
+  -- twilio_realtime con pool propio (ver organization_phone_numbers). Sirve
+  -- para revisar despues si algun numero especifico empieza a fallar/ser
+  -- marcado como spam por los operadores.
+  from_number VARCHAR(20) DEFAULT NULL,
 
   status ENUM('queued', 'ringing', 'in_progress', 'completed', 'failed', 'no_answer', 'voicemail')
     NOT NULL DEFAULT 'queued',

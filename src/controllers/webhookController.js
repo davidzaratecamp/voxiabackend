@@ -1,6 +1,7 @@
 const twilio = require('twilio');
 const env = require('../config/env');
 const callOrchestrator = require('../services/callOrchestrator');
+const organizationModel = require('../models/organizationModel');
 const HttpError = require('../utils/httpError');
 
 function toWebSocketUrl(httpUrl) {
@@ -17,12 +18,23 @@ function verifySipWebhookSecret(req) {
 // Solo en produccion: en local no hay forma de generar una firma real de
 // Twilio para probar con curl, y bloquearla ahi rompe el flujo de pruebas
 // que ya usamos en este proyecto.
-function verifyTwilioSignature(req) {
+//
+// organizationId viene como query param en la URL del webhook (lo agrega
+// twilioRealtimeProvider.js al originar la llamada) porque cada
+// organizacion puede tener su propia cuenta Twilio, con su propio Auth
+// Token -- validar siempre contra el token global rompería la firma para
+// cualquier organizacion con cuenta propia. Sin organizationId (webhooks
+// viejos o de organizaciones sin cuenta propia) cae al token global.
+async function verifyTwilioSignature(req) {
   if (env.nodeEnv !== 'production') return;
+
+  const organizationId = req.query.organizationId;
+  const organization = organizationId ? await organizationModel.findById(organizationId) : null;
+  const authToken = organization?.twilio_auth_token || env.twilio.authToken;
 
   const signature = req.headers['x-twilio-signature'];
   const url = `${env.publicBaseUrl}${req.originalUrl}`;
-  const valid = twilio.validateRequest(env.twilio.authToken, signature, url, req.body);
+  const valid = twilio.validateRequest(authToken, signature, url, req.body);
   if (!valid) {
     throw new HttpError(401, 'Firma de Twilio invalida.');
   }
@@ -45,8 +57,8 @@ async function incomingNativeSip(req, res) {
 }
 
 // POST /api/v1/webhooks/twilio/voice - TwiML webhook, Twilio lo pide al contestar
-function twilioVoiceWebhook(req, res) {
-  verifyTwilioSignature(req);
+async function twilioVoiceWebhook(req, res) {
+  await verifyTwilioSignature(req);
 
   const { contactId, callLogId } = req.query;
   const streamUrl = `${toWebSocketUrl(env.publicBaseUrl)}/api/v1/webhooks/twilio/stream`;
@@ -62,7 +74,7 @@ function twilioVoiceWebhook(req, res) {
 
 // POST /api/v1/webhooks/twilio/status - status callback de Twilio
 async function twilioStatusCallback(req, res) {
-  verifyTwilioSignature(req);
+  await verifyTwilioSignature(req);
 
   const { callLogId } = req.query;
   await callOrchestrator.updateCallStatusFromProviderEvent('twilio_realtime', req.body, callLogId);

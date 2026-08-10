@@ -21,9 +21,9 @@ async function initiateCallForContact(contact, campaign) {
     status: 'queued',
   });
 
-  const { externalCallId } = await provider.initiateOutboundCall({ contact, campaign, callLog });
+  const { externalCallId, fromNumber } = await provider.initiateOutboundCall({ contact, campaign, callLog });
 
-  await callLogModel.setExternalCallId(callLog.id, externalCallId);
+  await callLogModel.setExternalCallId(callLog.id, externalCallId, fromNumber);
   await callLogModel.updateStatus(callLog.id, 'ringing');
   await contactModel.updateStatus(contact.id, 'calling', { incrementAttempts: true });
 

@@ -24,4 +24,27 @@ async function findById(id) {
   return rows[0] || null;
 }
 
-module.exports = { create, findAll, findById };
+// Solo credenciales Twilio propias por ahora -- ver comentario de
+// twilio_account_sid/twilio_auth_token en schema.sql. Pasar '' (string
+// vacio) para cualquiera de los dos los limpia (vuelve a NULL, cae al
+// .env global); pasar undefined deja el campo como esta.
+async function update(id, { twilioAccountSid, twilioAuthToken }) {
+  const fields = [];
+  const params = { id };
+
+  if (twilioAccountSid !== undefined) {
+    fields.push('twilio_account_sid = :twilioAccountSid');
+    params.twilioAccountSid = twilioAccountSid || null;
+  }
+  if (twilioAuthToken !== undefined) {
+    fields.push('twilio_auth_token = :twilioAuthToken');
+    params.twilioAuthToken = twilioAuthToken || null;
+  }
+
+  if (fields.length === 0) return findById(id);
+
+  await pool.query(`UPDATE organizations SET ${fields.join(', ')} WHERE id = :id`, params);
+  return findById(id);
+}
+
+module.exports = { create, findAll, findById, update };

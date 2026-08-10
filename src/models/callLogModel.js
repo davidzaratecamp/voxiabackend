@@ -22,11 +22,21 @@ async function findByExternalId(externalCallId) {
   return rows[0] || null;
 }
 
-async function setExternalCallId(id, externalCallId) {
-  await pool.query('UPDATE call_logs SET external_call_id = :externalCallId WHERE id = :id', {
-    id,
-    externalCallId,
-  });
+// fromNumber es opcional -- solo lo manda twilio_realtime cuando la
+// organizacion tiene pool propio de numeros (ver
+// organizationPhoneNumberModel.claimNextNumber). Se actualiza junto con
+// external_call_id en el mismo UPDATE porque ambos llegan en el mismo
+// punto del flujo (justo despues de que el proveedor origina la llamada).
+async function setExternalCallId(id, externalCallId, fromNumber) {
+  const fields = ['external_call_id = :externalCallId'];
+  const params = { id, externalCallId };
+
+  if (fromNumber !== undefined) {
+    fields.push('from_number = :fromNumber');
+    params.fromNumber = fromNumber;
+  }
+
+  await pool.query(`UPDATE call_logs SET ${fields.join(', ')} WHERE id = :id`, params);
   return findById(id);
 }
 
