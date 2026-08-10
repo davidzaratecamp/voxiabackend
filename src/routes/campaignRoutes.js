@@ -6,6 +6,7 @@ const contactController = require('../controllers/contactController');
 const router = express.Router();
 
 router.post('/', asyncHandler(campaignController.create));
+router.post('/preview', asyncHandler(campaignController.previewPrompt));
 router.get('/', asyncHandler(campaignController.list));
 router.get('/:id', asyncHandler(campaignController.getById));
 router.patch('/:id', asyncHandler(campaignController.update));

@@ -2,11 +2,11 @@ const { pool } = require('../config/db');
 
 // telephonyProvider siempre viene forzado desde organizations.telephony_provider
 // (ver campaignController.create) -- este modelo solo persiste lo que le pasan.
-async function create({ organizationId, name, type, telephonyProvider, voice, language, accent, speed, systemPromptTemplate }) {
+async function create({ organizationId, name, type, telephonyProvider, voice, language, accent, speed, turnLength, allowLists, systemPromptTemplate }) {
   const [result] = await pool.query(
-    `INSERT INTO campaigns (organization_id, name, type, telephony_provider, voice, language, accent, speed, system_prompt_template)
-     VALUES (:organizationId, :name, :type, :telephonyProvider, :voice, :language, :accent, :speed, :systemPromptTemplate)`,
-    { organizationId, name, type, telephonyProvider, voice, language, accent, speed, systemPromptTemplate }
+    `INSERT INTO campaigns (organization_id, name, type, telephony_provider, voice, language, accent, speed, turn_length, allow_lists, system_prompt_template)
+     VALUES (:organizationId, :name, :type, :telephonyProvider, :voice, :language, :accent, :speed, :turnLength, :allowLists, :systemPromptTemplate)`,
+    { organizationId, name, type, telephonyProvider, voice, language, accent, speed, turnLength, allowLists, systemPromptTemplate }
   );
   return findById(result.insertId);
 }
@@ -45,7 +45,7 @@ async function updateStatus(id, status) {
 
 // telephonyProvider y organizationId NO son editables aqui a proposito
 // (siguen atados a la organizacion, ver campaignController.create).
-async function update(id, { name, type, voice, language, accent, speed, systemPromptTemplate }) {
+async function update(id, { name, type, voice, language, accent, speed, turnLength, allowLists, systemPromptTemplate }) {
   const fields = [];
   const params = { id };
 
@@ -72,6 +72,14 @@ async function update(id, { name, type, voice, language, accent, speed, systemPr
   if (speed !== undefined) {
     fields.push('speed = :speed');
     params.speed = speed;
+  }
+  if (turnLength !== undefined) {
+    fields.push('turn_length = :turnLength');
+    params.turnLength = turnLength;
+  }
+  if (allowLists !== undefined) {
+    fields.push('allow_lists = :allowLists');
+    params.allowLists = allowLists;
   }
   if (systemPromptTemplate !== undefined) {
     fields.push('system_prompt_template = :systemPromptTemplate');

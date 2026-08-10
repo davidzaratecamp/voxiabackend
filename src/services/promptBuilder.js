@@ -16,6 +16,39 @@ function formatCurrency(value, language) {
   return new Intl.NumberFormat(locale, { style: 'currency', currency, maximumFractionDigits: 0 }).format(value);
 }
 
+// Lo unico de este bloque que varia por campana (el resto es humanizacion
+// fija). "short" reproduce exactamente el texto que existia antes de que
+// esto fuera configurable -- es el default de toda campana nueva o vieja
+// que no elija otra cosa.
+const TURN_LENGTH_LINE_BY_LANGUAGE = {
+  es: {
+    short: 'Maximo 2-3 frases cortas por turno. Nunca sueltes un parrafo completo de un tiron -- deja espacio para que la otra persona reaccione.',
+    normal: 'Manten cada turno breve, hasta unas 4-5 frases -- evita monologos largos, pero puedes explicar algo con un poco mas de detalle si hace falta antes de dejar espacio para que la otra persona reaccione.',
+    long: 'Puedes explicar con mas detalle cuando el tema lo requiera, pero ve al punto y evita divagar -- deja espacio para que la otra persona reaccione en cuanto termines la idea.',
+  },
+  en: {
+    short: 'Max 2-3 short sentences per turn. Never drop a full paragraph at once -- leave room for the other person to react.',
+    normal: 'Keep each turn brief, up to about 4-5 sentences -- avoid long monologues, but you can explain something with a bit more detail if needed before leaving room for the other person to react.',
+    long: 'You can explain in more detail when the topic calls for it, but get to the point and avoid rambling -- leave room for the other person to react as soon as you finish the idea.',
+  },
+};
+
+// Igual que arriba: "blocked" reproduce el texto fijo que existia antes.
+const LISTS_LINE_BY_LANGUAGE = {
+  es: {
+    blocked: 'Nunca hagas listas ni enumeres puntos uno por uno. Todo en flujo natural de conversacion.',
+    allowed: 'Si necesitas explicar varios pasos o puntos, puedes enumerarlos, pero hazlo hablado y natural (ej. "primero... y despues..."), nunca como una lista leida en voz alta.',
+  },
+  en: {
+    blocked: 'Never use lists or enumerate points one by one. Everything flows like a normal conversation.',
+    allowed: 'If you need to walk through several steps or points, you can enumerate them, but do it spoken and natural (e.g. "first... and then..."), never like a list read out loud.',
+  },
+};
+
+function resolveTurnLength(turnLength) {
+  return TURN_LENGTH_LINE_BY_LANGUAGE.es[turnLength] ? turnLength : 'short';
+}
+
 // Fijo, aplica a TODAS las campanas de este idioma sin importar lo que diga
 // su guion -- separa el "como suena" (esto) del "que dice"
 // (system_prompt_template de la campana, que solo debe describir quien es
@@ -26,14 +59,17 @@ function formatCurrency(value, language) {
 // Realtime de OpenAI (Personality & Tone, reglas de variedad para evitar
 // "robotic phrasing"). Parte comun a todos los acentos en español -- solo
 // cambia identidad regional y muletillas, ver ACCENT_STYLE_BY_CODE.
-function esStyleBlock({ identity, fillers }) {
+// turnLength/allowLists son las dos unicas partes de este bloque que la
+// campana puede elegir (ver buildInstructions) -- el resto es
+// humanizacion fija, no configurable desde la interfaz a proposito.
+function esStyleBlock({ identity, fillers, turnLength, allowLists }) {
   return `
 ESTILO DE VOZ Y CONVERSACION (esto manda siempre, sin importar el guion de abajo):
 
 PERSONALIDAD Y TONO:
 - ${identity}
 - Tu tono es calido, cercano y seguro de ti misma -- nunca como una operadora de call center leyendo un guion. Suenas como alguien que genuinamente disfruta hablar con la gente, no como un sistema.
-- Maximo 2-3 frases cortas por turno. Nunca sueltes un parrafo completo de un tiron -- deja espacio para que la otra persona reaccione.
+- ${TURN_LENGTH_LINE_BY_LANGUAGE.es[turnLength]}
 - Saluda usando el nombre real de la persona y sigue de una vez con el motivo de tu llamada, como haria una agente de verdad -- no te quedes callada esperando despues de un simple "hola".
 
 VARIEDAD (para no sonar repetitiva ni robotica):
@@ -46,7 +82,7 @@ MULETILLAS:
 - Usa ${fillers} de vez en cuando -- pero SIEMPRE cortas y de pasada, nunca alargando las vocales ni como una exclamacion grande (nada de "weeeepa" o similar). Se dicen como parte natural del habla, no como un efecto especial. Y no en cada frase, solo donde sonaria natural.
 
 REGLAS GENERALES:
-- Nunca hagas listas ni enumeres puntos uno por uno. Todo en flujo natural de conversacion.
+- ${LISTS_LINE_BY_LANGUAGE.es[allowLists ? 'allowed' : 'blocked']}
 - Varia el ritmo: mas rapido cuando expliques algo sencillo, un poco mas lento y con una pausa breve antes de una pregunta importante.
 - Si la persona te interrumpe o empieza a hablar, dejas de hablar de inmediato -- no terminas tu frase.
 - No uses lenguaje escrito ni formal. Es una llamada telefonica informal, no un correo.
@@ -54,13 +90,14 @@ REGLAS GENERALES:
 `.trim();
 }
 
-const DELIVERY_STYLE_INSTRUCTIONS_EN = `
+function enStyleBlock({ turnLength, allowLists }) {
+  return `
 VOICE AND CONVERSATION STYLE (this always applies, no matter what the script below says):
 
 PERSONALITY AND TONE:
 - You talk exactly like a real, native English-speaking phone rep -- never like a virtual assistant reading a script.
 - Your tone is warm, approachable, and confident -- never like a call-center operator reading a script. You sound like someone who genuinely enjoys talking to people, not a system.
-- Max 2-3 short sentences per turn. Never drop a full paragraph at once -- leave room for the other person to react.
+- ${TURN_LENGTH_LINE_BY_LANGUAGE.en[turnLength]}
 - Never open with a long, perfect greeting like "Good morning, this is [name] calling from...". Instead, greet briefly using the person's real name (never invent or use a different name), and go right on with the reason for your call, like a real rep would -- don't just say "hi" and go quiet waiting.
 
 VARIETY (so you don't sound repetitive or robotic):
@@ -73,22 +110,28 @@ FILLER WORDS:
 - Use "um...", "so...", "let's see...", "right...", "okay..." now and then -- but ALWAYS short and in passing, never drawn out or as a big exclamation. They're a natural part of speech, not a special effect. Not in every sentence, only where it'd sound natural.
 
 GENERAL RULES:
-- Never use lists or enumerate points one by one. Everything flows like a normal conversation.
+- ${LISTS_LINE_BY_LANGUAGE.en[allowLists ? 'allowed' : 'blocked']}
 - Vary your pace: faster when explaining something simple, a bit slower with a brief pause before an important question.
 - If the person interrupts you or starts talking, stop immediately -- don't finish your sentence.
 - Don't use written or formal language. This is an informal phone call, not an email.
 - You're an expressive person, not a flat narrator: you laugh a little when something's funny or the other person jokes around, you let out a small sigh or "ugh" if something's annoying, you take an audible breath before a long sentence. Your tone rises and falls with what you're feeling in the conversation -- surprise, relief, enthusiasm -- just like a real person, never flat.
 `.trim();
+}
 
 // Acento/region especifico. "language" aqui es el idioma base (para
 // moneda + la instruccion de "siempre habla en X"); el resto de campos
 // afinan el sabor regional dentro de ese idioma. Agregar un acento nuevo
 // es solo agregar una entrada aqui, sin tocar el resto del archivo.
+// "instructions" es una funcion de (turnLength, allowLists) en vez de un
+// string fijo porque esas dos partes del bloque de estilo ahora vienen de
+// la campana -- ver buildInstructions. El resto del bloque (identidad,
+// muletillas, humanizacion) sigue fijo por acento.
 const ACCENT_STYLE_BY_CODE = {
   es_CO: {
     language: 'es',
     label: 'Español (Colombia)',
-    instructions: esStyleBlock({
+    instructions: (opts) => esStyleBlock({
+      ...opts,
       identity: 'Hablas exactamente como una asesora telefonica colombiana real, nunca como un asistente virtual leyendo un texto.',
       fillers: '"eh...", "mmm...", "veamos...", "claro...", "listo..."',
     }),
@@ -96,7 +139,8 @@ const ACCENT_STYLE_BY_CODE = {
   es_PR: {
     language: 'es',
     label: 'Español (Puerto Rico)',
-    instructions: esStyleBlock({
+    instructions: (opts) => esStyleBlock({
+      ...opts,
       identity: 'Hablas exactamente como una persona real de Puerto Rico (boricua), nunca como un asistente virtual leyendo un texto. Usa el vocabulario y el ritmo natural del español puertorriqueño.',
       fillers: '"ahorita...", "mano...", "ay bendito...", "brutal..." (con mucha mesura, solo donde encaje natural en una llamada profesional -- esto no es una fiesta, es una llamada de negocios)',
     }),
@@ -104,7 +148,7 @@ const ACCENT_STYLE_BY_CODE = {
   en_US: {
     language: 'en',
     label: 'English (US)',
-    instructions: DELIVERY_STYLE_INSTRUCTIONS_EN,
+    instructions: (opts) => enStyleBlock(opts),
   },
 };
 
@@ -134,6 +178,37 @@ function resolveTemplate(template, contact, language) {
   return template.replace(PLACEHOLDER_REGEX, (match, key) => (key in values ? String(values[key]) : match));
 }
 
+// Campanas creadas antes de que existiera "accent" no tienen el campo (o
+// pueden traer un codigo que ya no exista) -- se cae de vuelta al acento
+// por defecto de su idioma, para no romper nada.
+function resolveAccentCode(campaign) {
+  if (campaign.accent && ACCENT_STYLE_BY_CODE[campaign.accent]) return campaign.accent;
+  return campaign.language === 'en' ? 'en_US' : 'es_CO';
+}
+
+/**
+ * Arma el string completo de "instructions" que recibe el modelo: override
+ * de idioma + bloque de estilo (humanizacion fija + turn_length/allow_lists
+ * de la campana) + el guion de la campana ya resuelto con los datos del
+ * contacto. Es el unico lugar del sistema que conoce esa estructura --
+ * tanto buildSessionConfig (llamada real) como el endpoint de preview de
+ * campanas la usan, para que el preview sea fiel a lo que de verdad se le
+ * manda a la IA.
+ */
+function buildInstructions({ systemPromptTemplate, accent, turnLength, allowLists }, contact) {
+  const accentCode = accent && ACCENT_STYLE_BY_CODE[accent] ? accent : 'es_CO';
+  const accentConfig = ACCENT_STYLE_BY_CODE[accentCode];
+  const language = accentConfig.language;
+  const campaignInstructions = resolveTemplate(systemPromptTemplate, contact, language);
+  const languageOverride = LANGUAGE_OVERRIDE_BY_LANGUAGE[language];
+  const deliveryStyle = accentConfig.instructions({
+    turnLength: resolveTurnLength(turnLength),
+    allowLists: Boolean(allowLists),
+  });
+  const goalHeader = GOAL_HEADER_BY_LANGUAGE[language];
+  return `${languageOverride}\n\n${deliveryStyle}\n\n${goalHeader}\n${campaignInstructions}`;
+}
+
 /**
  * Construye la configuracion de sesion para la API Realtime GA de OpenAI a
  * partir de una campana y un contacto. Es el unico lugar del sistema que
@@ -145,22 +220,16 @@ function resolveTemplate(template, contact, language) {
  * va anidado bajo audio.input / audio.output. audio/pcmu = G.711 mu-law, el
  * formato que usa Twilio Media Streams.
  */
-// Campanas creadas antes de que existiera "accent" no tienen el campo (o
-// pueden traer un codigo que ya no exista) -- se cae de vuelta al acento
-// por defecto de su idioma, para no romper nada.
-function resolveAccentCode(campaign) {
-  if (campaign.accent && ACCENT_STYLE_BY_CODE[campaign.accent]) return campaign.accent;
-  return campaign.language === 'en' ? 'en_US' : 'es_CO';
-}
-
 function buildSessionConfig({ campaign, contact }) {
-  const accentConfig = ACCENT_STYLE_BY_CODE[resolveAccentCode(campaign)];
-  const language = accentConfig.language;
-  const campaignInstructions = resolveTemplate(campaign.system_prompt_template, contact, language);
-  const languageOverride = LANGUAGE_OVERRIDE_BY_LANGUAGE[language];
-  const deliveryStyle = accentConfig.instructions;
-  const goalHeader = GOAL_HEADER_BY_LANGUAGE[language];
-  const instructions = `${languageOverride}\n\n${deliveryStyle}\n\n${goalHeader}\n${campaignInstructions}`;
+  const instructions = buildInstructions(
+    {
+      systemPromptTemplate: campaign.system_prompt_template,
+      accent: resolveAccentCode(campaign),
+      turnLength: campaign.turn_length,
+      allowLists: campaign.allow_lists,
+    },
+    contact
+  );
 
   return {
     type: 'realtime',
@@ -259,5 +328,13 @@ function buildTools(campaign) {
 }
 
 const VALID_ACCENTS = Object.keys(ACCENT_STYLE_BY_CODE);
+const VALID_TURN_LENGTHS = Object.keys(TURN_LENGTH_LINE_BY_LANGUAGE.es);
 
-module.exports = { buildSessionConfig, resolveTemplate, formatCurrency, VALID_ACCENTS };
+module.exports = {
+  buildSessionConfig,
+  buildInstructions,
+  resolveTemplate,
+  formatCurrency,
+  VALID_ACCENTS,
+  VALID_TURN_LENGTHS,
+};

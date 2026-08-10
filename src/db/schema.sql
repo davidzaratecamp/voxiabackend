@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS campaigns (
   -- normal). Ver audio.output.speed en promptBuilder.js.
   speed DECIMAL(3, 2) NOT NULL DEFAULT 1.00,
 
+  -- Cuanto puede extenderse el agente por turno de habla. Ver
+  -- TURN_LENGTH_LINE_BY_LANGUAGE en promptBuilder.js. Default 'short'
+  -- reproduce el comportamiento fijo que tenia el sistema antes de este
+  -- campo (maximo 2-3 frases por turno).
+  turn_length ENUM('short', 'normal', 'long') NOT NULL DEFAULT 'short',
+
+  -- Si el agente puede enumerar pasos/puntos hablados o no. Ver
+  -- LISTS_LINE_BY_LANGUAGE en promptBuilder.js. Default 0 reproduce el
+  -- comportamiento fijo anterior (nunca hacer listas).
+  allow_lists TINYINT(1) NOT NULL DEFAULT 0,
+
   -- Plantilla de instrucciones del agente. Soporta placeholders {{full_name}},
   -- {{balance_due}}, {{phone_number}} resueltos por promptBuilder.js
   system_prompt_template TEXT NOT NULL,
