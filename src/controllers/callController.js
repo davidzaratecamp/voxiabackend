@@ -1,5 +1,4 @@
 const callLogModel = require('../models/callLogModel');
-const campaignModel = require('../models/campaignModel');
 const { assertOrgAccess } = require('../middleware/auth');
 const HttpError = require('../utils/httpError');
 
@@ -13,9 +12,17 @@ async function live(req, res) {
 }
 
 async function recent(req, res) {
-  const limit = parseInt(req.query.limit || '50', 10);
-  const calls = await callLogModel.findRecent(limit, resolveOrgFilter(req));
-  res.json(calls);
+  const { campaignId, status, outcome, offset } = req.query;
+  const limit = parseInt(req.query.limit || '25', 10);
+  const result = await callLogModel.findFiltered({
+    organizationId: resolveOrgFilter(req),
+    campaignId,
+    status,
+    outcome,
+    limit,
+    offset: parseInt(offset || '0', 10),
+  });
+  res.json(result);
 }
 
 async function metrics(req, res) {
@@ -24,11 +31,10 @@ async function metrics(req, res) {
 }
 
 async function getById(req, res) {
-  const call = await callLogModel.findById(req.params.id);
+  const call = await callLogModel.findByIdWithDetails(req.params.id);
   if (!call) throw new HttpError(404, 'Llamada no encontrada.');
 
-  const campaign = await campaignModel.findById(call.campaign_id);
-  assertOrgAccess(req.user, campaign?.organization_id);
+  assertOrgAccess(req.user, call.organization_id);
 
   res.json(call);
 }

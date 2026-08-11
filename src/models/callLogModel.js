@@ -92,6 +92,74 @@ async function findLive(organizationId) {
   return rows;
 }
 
+// Igual que findRecent, pero con filtros/paginacion para la seccion de
+// historial del Dashboard (filtrar por campana/estado/outcome y hojear
+// resultados en vez de traer siempre los ultimos N). Devuelve el total que
+// matchea los mismos filtros (sin LIMIT/OFFSET) para poder pintar "mostrando
+// X-Y de Z" y saber cuando deshabilitar "Siguiente".
+async function findFiltered({ organizationId, campaignId, status, outcome, limit = 25, offset = 0 }) {
+  const params = { limit, offset };
+  const conditions = [];
+
+  if (organizationId) {
+    conditions.push('camp.organization_id = :organizationId');
+    params.organizationId = organizationId;
+  }
+  if (campaignId) {
+    conditions.push('cl.campaign_id = :campaignId');
+    params.campaignId = campaignId;
+  }
+  if (status) {
+    conditions.push('cl.status = :status');
+    params.status = status;
+  }
+  if (outcome) {
+    conditions.push('cl.outcome = :outcome');
+    params.outcome = outcome;
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const [rows] = await pool.query(
+    `SELECT cl.*, c.phone_number, c.full_name, camp.name AS campaign_name
+     FROM call_logs cl
+     JOIN contacts c ON c.id = cl.contact_id
+     JOIN campaigns camp ON camp.id = cl.campaign_id
+     ${where}
+     ORDER BY cl.created_at DESC
+     LIMIT :limit OFFSET :offset`,
+    params
+  );
+
+  const [[{ total }]] = await pool.query(
+    `SELECT COUNT(*) AS total
+     FROM call_logs cl
+     JOIN contacts c ON c.id = cl.contact_id
+     JOIN campaigns camp ON camp.id = cl.campaign_id
+     ${where}`,
+    params
+  );
+
+  return { calls: rows, total };
+}
+
+// Como findById, pero con el mismo join de contacts/campaigns que
+// findRecent/findFiltered -- usado solo en la vista de detalle de una
+// llamada (callController.getById), asi el controller no necesita una
+// segunda consulta a campaignModel solo para el chequeo de acceso
+// (organization_id ya viene en el resultado).
+async function findByIdWithDetails(id) {
+  const [rows] = await pool.query(
+    `SELECT cl.*, c.phone_number, c.full_name, camp.name AS campaign_name, camp.organization_id
+     FROM call_logs cl
+     JOIN contacts c ON c.id = cl.contact_id
+     JOIN campaigns camp ON camp.id = cl.campaign_id
+     WHERE cl.id = :id`,
+    { id }
+  );
+  return rows[0] || null;
+}
+
 async function findRecent(limit = 50, organizationId) {
   const params = { limit };
   let orgFilter = '';
@@ -163,9 +231,11 @@ module.exports = {
   create,
   findById,
   findByExternalId,
+  findByIdWithDetails,
   setExternalCallId,
   updateStatus,
   findLive,
   findRecent,
+  findFiltered,
   getDashboardMetrics,
 };
