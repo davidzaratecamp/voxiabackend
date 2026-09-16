@@ -10,5 +10,7 @@ const router = express.Router();
 router.post('/openai/incoming', asyncHandler(webhookController.incomingNativeSip));
 router.post('/twilio/voice', asyncHandler(webhookController.twilioVoiceWebhook));
 router.post('/twilio/status', asyncHandler(webhookController.twilioStatusCallback));
+router.post('/twilio/forward/voice', asyncHandler(webhookController.twilioForwardVoice));
+router.post('/twilio/forward/sms', asyncHandler(webhookController.twilioForwardSms));
 
 module.exports = router;

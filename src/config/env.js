@@ -39,6 +39,14 @@ const env = {
     webhookSecret: process.env.OPENAI_SIP_WEBHOOK_SECRET || '',
   },
 
+  // Reenvio de llamadas/SMS de un numero puntual del pool (ver
+  // /webhooks/twilio/forward/* en webhookController.js) hacia un celular
+  // personal -- caso de uso ajeno a las campanas de IA (ej. recibir codigos
+  // de verificacion de un servicio externo en un numero que ya no se marca).
+  forwarding: {
+    toNumber: process.env.FORWARD_TO_NUMBER || '',
+  },
+
   jwt: {
     secret: process.env.JWT_SECRET || '',
     expiresIn: process.env.JWT_EXPIRES_IN || '12h',

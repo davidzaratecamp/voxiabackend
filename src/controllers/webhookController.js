@@ -81,4 +81,42 @@ async function twilioStatusCallback(req, res) {
   res.sendStatus(204);
 }
 
-module.exports = { incomingNativeSip, twilioVoiceWebhook, twilioStatusCallback };
+// POST /api/v1/webhooks/twilio/forward/voice?organizationId=X - webhook de
+// "a call comes in" configurado directo en el numero de Twilio (no pasa por
+// callOrchestrator/campaignas, es un numero del pool desviado a un celular
+// personal). organizationId identifica de que cuenta Twilio es el numero
+// para validar la firma con el auth_token correcto (ver verifyTwilioSignature).
+async function twilioForwardVoice(req, res) {
+  await verifyTwilioSignature(req);
+
+  if (!env.forwarding.toNumber) {
+    throw new HttpError(500, 'FORWARD_TO_NUMBER no esta configurado.');
+  }
+
+  const response = new twilio.twiml.VoiceResponse();
+  response.dial(env.forwarding.toNumber);
+  res.type('text/xml').send(response.toString());
+}
+
+// POST /api/v1/webhooks/twilio/forward/sms?organizationId=X - webhook de
+// "a message comes in", mismo numero que twilioForwardVoice.
+async function twilioForwardSms(req, res) {
+  await verifyTwilioSignature(req);
+
+  if (!env.forwarding.toNumber) {
+    throw new HttpError(500, 'FORWARD_TO_NUMBER no esta configurado.');
+  }
+
+  const { From, Body } = req.body;
+  const response = new twilio.twiml.MessagingResponse();
+  response.message({ to: env.forwarding.toNumber }, `De ${From}: ${Body || ''}`);
+  res.type('text/xml').send(response.toString());
+}
+
+module.exports = {
+  incomingNativeSip,
+  twilioVoiceWebhook,
+  twilioStatusCallback,
+  twilioForwardVoice,
+  twilioForwardSms,
+};
